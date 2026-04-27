@@ -1,0 +1,302 @@
+/* =====================================================
+   GLOBAL
+===================================================== */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: Arial, sans-serif;
+  background: #f4f6f8;
+  margin: 20px;
+  color: #222;
+}
+
+/* =====================================================
+   TABS
+===================================================== */
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 15px;
+}
+
+.tab {
+  padding: 10px 18px;
+  border: none;
+  background: #ddd;
+  cursor: pointer;
+  font-weight: 700;
+  border-radius: 6px 6px 0 0;
+}
+
+.tab.active {
+  background: #fff;
+  border-bottom: 2px solid #fff;
+}
+
+/* Contenu des onglets */
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+/* =====================================================
+   CARDS
+===================================================== */
+.card {
+  background: #fff;
+  padding: 16px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  border: 1px solid #e0e4ea;
+}
+
+.card.highlight {
+  border-left: 6px solid #1f3c88;
+}
+
+/* =====================================================
+   FORM / GRID
+===================================================== */
+.grid {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+/* =====================================================
+   BUTTONS
+===================================================== */
+button {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+button.primary,
+.btn {
+  background: #1f3c88;
+  color: #fff;
+  padding: 8px 14px;
+  border: 1px solid #1f3c88;
+  border-radius: 6px;
+}
+
+button.primary:hover,
+.btn:hover {
+  filter: brightness(0.95);
+}
+
+button.secondary,
+.btn-secondary {
+  background: #fff;
+  color: #1f3c88;
+  border: 1px solid #1f3c88;
+  padding: 8px 14px;
+  border-radius: 6px;
+}
+
+/* =====================================================
+   RESULTS
+===================================================== */
+.results {
+  margin-top: 12px;
+  background: #eef2ff;
+  padding: 12px;
+  border-radius: 6px;
+  font-weight: 700;
+}
+
+/* =====================================================
+   TOOLBARS / INFOS
+===================================================== */
+.zone-toolbar,
+.zone-toolbar-right,
+.zone-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.zone-toolbar {
+  justify-content: space-between;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+.badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #f1f3f5;
+  border: 1px solid #e1e5ea;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.info-line {
+  margin-top: 10px;
+  font-weight: bold;
+}
+
+/* =====================================================
+   PALETTE FAMILLES
+===================================================== */
+.palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* =====================================================
+   CANVAS
+===================================================== */
+/* Le canvas ne scroll pas et garde sa taille réelle */
+canvas {
+  display: block;
+  background: #fff;
+  border: 1px solid #ccc;
+  margin-bottom: 20px;
+}
+
+/* =====================================================
+   CONTAINERS DE PLAN
+===================================================== */
+/* Pas de scroll interne, le canvas peut s'agrandir */
+#implantationContainer,
+#heatmapContainer {
+  overflow: visible;
+  height: auto;
+}
+
+/* =====================================================
+   LOADER GLOBAL (BLOCANT)
+===================================================== */
+
+.loader-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 30, 60, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.loader-overlay.hidden {
+  display: none;
+}
+
+.loader-box {
+  background: #fff;
+  padding: 24px 30px;
+  border-radius: 12px;
+  min-width: 300px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+
+.loader-text {
+  font-weight: bold;
+  margin-bottom: 14px;
+}
+
+/* Barre de chargement */
+.loader-bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #ddd;
+  overflow: hidden;
+}
+
+.loader-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: #1f3c88;
+  transition: width 0.35s ease;
+}
+
+@keyframes loaderMove {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(50%); }
+  100% { transform: translateX(200%); }
+}
+
+/* === Layout paramètres temps + hauteur === */
+.time-and-height {
+  display: grid;
+  grid-template-columns: 520px 220px; /* ✅ largeur contrôlée */
+  gap: 16px;                          /* ✅ espace réduit */
+  align-items: start;
+}
+
+/* IMPORTANT : empêche la colonne temps de forcer 100% */
+.time-params {
+  min-width: 0;
+}
+
+/* Bloc hauteur max */
+.height-params {
+  background: #f7f9fc;
+  border: 1px solid #d0d7e2;
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 12px;
+}
+
+.height-params h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: bold;
+  border-bottom: 1px solid #d0d7e2;
+  padding-bottom: 4px;
+}
+
+.height-params label {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 6px;
+}
+
+.height-params select {
+  height: 24px;
+  font-size: 12px;
+}
+
+.height-params button {
+  margin-top: 6px;
+  height: 26px;
+  font-size: 12px;
+  background: #2f5597;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.height-params button:hover {
+  background: #24447a;
+}
+
+/* === PARAMÈTRES TEMPS : INPUTS FIXES === */
+.time-params .grid {
+  grid-template-columns: 180px auto;
+}
+
+.time-params .grid input {
+  width: 90px;          /* largeur fixe */
+  max-width: 90px;
+  padding: 4px 6px;
+  font-size: 12px;
+  text-align: right;    /* chiffres alignés */
+}

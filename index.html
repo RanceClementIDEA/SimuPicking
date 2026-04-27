@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Simulation Picking – Implantation</title>
+
+  <!-- ================= CSS ================= -->
+  <link rel="stylesheet" href="style.css">
+
+  <!-- ================= Librairie Excel ================= -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+
+<body>
+
+<h1>Simulation de préparation – Implantation entrepôt</h1>
+
+<!-- ================= ONGLET NAVIGATION ================= -->
+<div class="tabs">
+  <button class="tab active" onclick="openTab('tab-actuel', this)">
+    Situation actuelle
+  </button>
+  <button class="tab" onclick="openTab('tab-reimplantation', this)">
+    Changement implantation
+  </button>
+  <button class="tab" onclick="openTab('tab-comparaison', this)">
+    Comparaison
+  </button>
+</div>
+
+<!-- ================= ONGLET 1 : ACTUEL ================= -->
+<div id="tab-actuel" class="tab-content active">
+
+  <!-- ================= DONNÉES ================= -->
+  <section class="card">
+    <h3>Données</h3>
+
+    <label>DT (historique des préparations)</label><br>
+    <input type="file" id="dtFile"><br><br>
+
+    <label>Stock actuel (Excel)</label><br>
+    <input type="file" id="stockFile"><br>
+  </section>
+
+  <!-- ================= PARAMÈTRES TEMPS ================= -->
+  <section class="card">
+    <h3>Paramètres temps unitaires</h3>
+
+    <div class="time-and-height">
+
+      <!-- ✅ COLONNE GAUCHE : TEMPS -->
+      <div class="time-params">
+        <div class="grid">
+          <label>X (inter‑allée)</label><input id="tX" value="2">
+          <label>Z+ montée</label><input id="tZup" value="2.2">
+          <label>Z‑ descente</label><input id="tZdown" value="1.4">
+          <label>Rotation</label><input id="tRot" value="2">
+          <label>Positionnement</label><input id="tPos" value="6">
+          <label>Manipulation palette</label><input id="tPal" value="20">
+          <label>Prise UM</label><input id="tUM" value="10">
+          <label>Scan</label><input id="tScan" value="40">
+          <label>Marge (%)</label><input id="tMarge" value="15">
+        </div>
+      </div>
+
+      <!-- ✅ COLONNE DROITE : HAUTEUR MAX -->
+      <div class="height-params">
+        <h4>Hauteur max</h4>
+
+        <label>Allée
+          <select id="heightAllee"></select>
+        </label>
+
+        <label>Travée
+          <select id="heightTravee"></select>
+        </label>
+
+        <label>Niveau max
+          <select id="heightNiveau"></select>
+        </label>
+
+        <button id="applyHeight">Appliquer</button>
+      </div>
+
+    </div>
+
+    <!-- ✅ ACTIONS -->
+    <button class="primary" onclick="runSimulation()">Calculer</button>
+
+    <div id="results" class="results">
+      Aucun calcul lancé.
+    </div>
+  </section>
+
+  <!-- ================= HEATMAP ================= -->
+  <section class="card">
+    <h3>Plan 2D – Heatmap (situation actuelle)</h3>
+    <canvas id="plan2D"></canvas>
+  </section>
+
+</div>
+
+<!-- ================= ONGLET 2 : RÉIMPLANTATION ================= -->
+<div id="tab-reimplantation" class="tab-content">
+
+  <section class="card">
+    <h3>Filtres d’implantation</h3>
+
+    <label>Niveau</label>
+    <select id="levelSelect"></select>
+
+    <label>Famille</label>
+    <select id="familleSelect">
+      <option value="">Toutes</option>
+    </select>
+  </section>
+
+  <div id="activeGestInfo" class="info-line">
+    Famille active : Aucune
+  </div>
+
+  <!-- ✅ DÉTAIL AUT -->
+  <div id="autDetailsPanel" class="card aut-panel">
+    <details id="autDetails">
+      <summary id="autSummary">AUT — Détail</summary>
+      <div id="autDetailsContent" class="side-content">—</div>
+    </details>
+  </div>
+
+  <div id="gestPalette" class="palette"></div>
+
+  <!-- ✅ AIDE À L’IMPLANTATION -->
+  <div id="implantationHints" class="card">
+    <h3>Aide à l’implantation</h3>
+
+    <div id="implantationHintsContent">
+      Lance une simulation pour afficher les recommandations.
+    </div>
+</div>
+
+  <div class="zone-toolbar-right">
+    <button class="btn" id="btnApply">Appliquer au sélectionné</button>
+    <button class="btn btn-secondary" id="btnClearSel">Vider sélection</button>
+    <button class="btn btn-primary" onclick="autoImplantationParBlocs_2Phases()">
+      Implantation automatique — répartition par blocs
+    </button>
+    <button class="btn btn-secondary" id="btnDuplicate">
+      Dupliquer la famille vers d’autres niveaux
+    </button>
+  </div>
+
+  <section class="card">
+    <h3>Plan 2D – Réimplantation</h3>
+    <canvas id="plan2D-interactif"></canvas>
+  </section>
+
+</div>
+
+<!-- ================= ONGLET 3 : COMPARAISON ================= -->
+<div id="tab-comparaison" class="tab-content">
+
+  <section class="card highlight">
+    <h3>Comparaison AVANT / APRÈS</h3>
+    <button class="primary" onclick="runComparison()">Comparer</button>
+
+    <div id="comparisonResults">
+      Aucune comparaison effectuée.
+    </div>
+  </section>
+
+</div>
+
+<!-- ================= LOADER ================= -->
+<div id="loader" class="loader-overlay hidden">
+  <div class="loader-box">
+    <div class="loader-text">
+      Calcul en cours… <span id="loaderPercent">0%</span>
+    </div>
+    <div class="loader-bar">
+      <div id="loaderBarFill" class="loader-bar-fill"></div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ================= JS PRINCIPAL ================= -->
+<script src="app.js"></script>
+
+<!-- ================= GESTION DES ONGLETS ================= -->
+<script>
+function openTab(id, btn) {
+  document.querySelectorAll('.tab').forEach(b =>
+    b.classList.remove('active')
+  );
+  document.querySelectorAll('.tab-content').forEach(t =>
+    t.classList.remove('active')
+  );
+  btn.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+</script>
+
+</body>
+</html>
