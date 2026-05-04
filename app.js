@@ -840,7 +840,27 @@ function getExistingLevels() {
 }
 
 console.log("✅ BLOC E chargé");
+// ✅ Niveaux POSSIBLES APRÈS (HAUTEUR_MAX + DELTA)
+function getPossibleLevelsApres() {
+  const niveaux = new Set();
 
+  ALLEES.split("").forEach(allee => {
+    for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
+      const max = getHauteurReimplant(allee, tr);
+      if (!max) continue;
+
+      for (
+        let n = "A";
+        n <= max;
+        n = String.fromCharCode(n.charCodeAt(0) + 1)
+      ) {
+        niveaux.add(n);
+      }
+    }
+  });
+
+  return [...niveaux].sort();
+}
 function initHeightEditor() {
   const selAllee = document.getElementById("heightAllee");
   const selTravee = document.getElementById("heightTravee");
@@ -1903,7 +1923,9 @@ function fillLevelSelect() {
 
   levelSel.innerHTML = "";
 
-  getExistingLevels().forEach(niv => {
+  const niveaux = getPossibleLevelsApres();
+
+niveaux.forEach(niv => {
     const opt = document.createElement("option");
     opt.value = niv;
     opt.textContent = `Niveau ${niv}`;
@@ -2118,7 +2140,10 @@ function openTab(tabId, btn) {
      ONGLET RÉIMPLANTATION
   ========================= */
   if (tabId === "tab-reimplantation") {
-  NIV_REIMPLANT ||= getExistingLevels()[0];
+  const niveaux = getPossibleLevelsApres();
+if (!niveaux.includes(NIV_REIMPLANT)) {
+  NIV_REIMPLANT = niveaux[0] || "";
+}
   rebuildEmpIndex();
 
   initReimplantHeightUI(); // ✅ ICI EXACTEMENT
