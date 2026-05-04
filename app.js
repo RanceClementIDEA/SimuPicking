@@ -778,6 +778,31 @@ function ensureFullLevel(niveau) {
 
   console.log(`✅ Niveau ${niv} complété (emplacements physiques uniquement)`);
 }
+/**
+ * ✅ Création ciblée d’un niveau PHYSIQUE
+ * uniquement pour UNE allée + UNE travée
+ */
+function ensurePhysicalLevelFor(allee, travee, niveau) {
+  const niv = (niveau || "").toUpperCase();
+  if (!NIVEAUX_AUTORISES.includes(niv)) return;
+
+  for (const pos of POSITIONS_PAR_DEFAUT) {
+    if (!emplacementExiste(allee, travee, pos, niv)) continue;
+
+    const empId =
+      `${allee}${String(travee).padStart(2, "0")}${niv}${pos}`;
+
+    if (!EMPLACEMENTS[empId]) {
+      EMPLACEMENTS[empId] = {
+        allee,
+        travee,
+        position: pos,
+        niveau: niv,
+        famille: null
+      };
+    }
+  }
+}
 function ensureAllPhysicalEmplacements() {
   const niveaux = new Set();
 
@@ -1990,7 +2015,6 @@ function bindUIOnce() {
   if (isReimplantation) {
     // 🔵 onglet Réimplantation
     NIV_REIMPLANT = levelSel.value;
-ensureFullLevel(NIV_REIMPLANT);
 rebuildEmpIndex();
 
 rebuildEmplCountByFam();   // ✅ recalcul cohérent
@@ -2020,8 +2044,7 @@ function rebuildLevelsAfterHeightChange() {
       if (!maxNiv) continue;
 
       for (let n = "A"; n <= maxNiv; n = String.fromCharCode(n.charCodeAt(0) + 1)) {
-        ensureFullLevel(n); // ✅ ajoute uniquement ce qui manque
-      }
+       }
     }
   });
 
@@ -2096,7 +2119,6 @@ function openTab(tabId, btn) {
   ========================= */
   if (tabId === "tab-reimplantation") {
   NIV_REIMPLANT ||= getExistingLevels()[0];
-  ensureFullLevel(NIV_REIMPLANT);
   rebuildEmpIndex();
 
   initReimplantHeightUI(); // ✅ ICI EXACTEMENT
@@ -2191,14 +2213,38 @@ function adjustReimpUI(delta) {
 
   travees.forEach(tr => {
     const key = `${allee}_${String(tr).padStart(2, "0")}`;
-    DELTA_NIVEAUX_REIMPLANT[key] =
-      (DELTA_NIVEAUX_REIMPLANT[key] || 0) + delta;
+
+    const oldDelta = DELTA_NIVEAUX_REIMPLANT[key] || 0;
+    const newDelta = oldDelta + delta;
+    DELTA_NIVEAUX_REIMPLANT[key] = newDelta;
+
+    // ✅ Calcul ancien / nouveau niveau MAX
+    const base = HAUTEUR_MAX[key];
+    if (!base) return;
+
+    const oldIdx = Math.max(0, base.charCodeAt(0) - 65 + oldDelta);
+    const newIdx = Math.max(0, base.charCodeAt(0) - 65 + newDelta);
+
+    // ✅ UNIQUEMENT si on AJOUTE des niveaux
+    if (newIdx > oldIdx) {
+      for (let i = oldIdx + 1; i <= newIdx; i++) {
+        const niv = String.fromCharCode(65 + i);
+        ensurePhysicalLevelFor(allee, tr, niv);
+      }
+    }
   });
 
-  // 🔁 Recalcul global
-  rebuildLevelsAfterHeightChange();
-}
+  updateReimpHeightInfo();
+// ✅ Rebuild index uniquement si le niveau affiché est impacté
+const nivCourant = NIV_REIMPLANT;
 
+updateReimpHeightInfo();
+
+rebuildEmpIndex();
+resizeImplantationCanvas();
+drawZonePlan();
+computeAideImplantation();
+}
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC K2 — RESIZE CANVAS & AIDE À L’IMPLANTATION
