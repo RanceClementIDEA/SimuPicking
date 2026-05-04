@@ -1082,7 +1082,7 @@ function rebuildEmpIndex() {
     for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
       for (let pos of POSITIONS_PAR_DEFAUT) {
 
-        if (!emplacementExiste(allee, tr, pos, niveau)) continue;
+        if (!isNiveauValideApres(allee, tr, niveau)) continue;
 
         const row = ROW_INDEX[`${tr}|${pos}`];
         if (row == null) continue;
@@ -1932,12 +1932,21 @@ niveaux.forEach(niv => {
     levelSel.appendChild(opt);
   });
 
-  levelSel.value =
-  document.getElementById("tab-reimplantation")?.classList.contains("active")
-    ? NIV_REIMPLANT
-    : NIV_ACTUEL;
-}
+  const isReimplantation =
+  document.getElementById("tab-reimplantation")?.classList.contains("active");
 
+if (isReimplantation) {
+  if (!niveaux.includes(NIV_REIMPLANT)) {
+    NIV_REIMPLANT = niveaux[0] || "";
+  }
+  levelSel.value = NIV_REIMPLANT;
+} else {
+  if (!niveaux.includes(NIV_ACTUEL)) {
+    NIV_ACTUEL = niveaux[0] || "";
+  }
+  levelSel.value = NIV_ACTUEL;
+}
+}
 /* =========================
    FILTRE FAMILLE (SELECT)
 ========================= */
@@ -2034,14 +2043,27 @@ function bindUIOnce() {
       .getElementById("tab-reimplantation")
       ?.classList.contains("active");
 
-  if (isReimplantation) {
-    // 🔵 onglet Réimplantation
-    NIV_REIMPLANT = levelSel.value;
-rebuildEmpIndex();
+ if (isReimplantation) {
+  // ✅ 1️⃣ niveau courant
+  NIV_REIMPLANT = levelSel.value;
 
-rebuildEmplCountByFam();   // ✅ recalcul cohérent
-computeAideImplantation(); // ✅ aide
-  } else {
+  // ✅ 2️⃣ garantir existence physique complète
+  ensureFullLevel(NIV_REIMPLANT);
+
+  // ✅ 3️⃣ rebuild logique
+  rebuildEmpIndex();
+
+  // ✅ 4️⃣ resize canvas (ROWS_TOTAL dépend du niveau)
+  resizeImplantationCanvas();
+
+  // ✅ 5️⃣ redraw plan
+  drawZonePlan();
+
+  // ✅ 6️⃣ sync métier
+  rebuildEmplCountByFam();
+  computeAideImplantation();
+}
+ else {
     // 🟢 onglet Situation actuelle (HEATMAP)
     NIV_ACTUEL = levelSel.value;
     resizeHeatmapCanvas();
@@ -2144,6 +2166,7 @@ function openTab(tabId, btn) {
 if (!niveaux.includes(NIV_REIMPLANT)) {
   NIV_REIMPLANT = niveaux[0] || "";
 }
+  fillLevelSelect();
   rebuildEmpIndex();
 
   initReimplantHeightUI(); // ✅ ICI EXACTEMENT
@@ -2258,7 +2281,10 @@ function adjustReimpUI(delta) {
       }
     }
   });
-
+// ✅ CORRECTION 2 — garantir que le niveau affiché existe PARTOUT
+if (NIV_REIMPLANT) {
+  ensureFullLevel(NIV_REIMPLANT);
+}
   updateReimpHeightInfo();
 // ✅ Rebuild index uniquement si le niveau affiché est impacté
 const nivCourant = NIV_REIMPLANT;
@@ -2269,6 +2295,7 @@ rebuildEmpIndex();
 resizeImplantationCanvas();
 drawZonePlan();
 computeAideImplantation();
+fillLevelSelect();
 }
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
