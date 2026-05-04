@@ -1,3 +1,4 @@
+
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC A — CONSTANTES & ÉTAT GLOBAL
@@ -17,15 +18,26 @@ let EMPLACEMENTS = {};
 let EMP_FAMILIES = {};
 let PREP_DATES = {};
 let STOCK_ROWS = [];
+let EMPLACEMENTS_STOCK = {};
+let ARTICLE_DATA_STOCK = {};
+let STOCK_BY_EMP = {};
+let EMPL_COUNT_BY_FAM = {};
 let HISTO_ANALYSIS = {
   worstSnapshot: {},
   capByFam: {}
 };
 
+let BESOIN_STOCK_CACHE = null;
 let FILTERS = {
-  niveau: "",
   famille: ""
 };
+
+// ✅ niveaux découplés par contexte
+let NIV_ACTUEL = "";        // plan actuel + heatmap
+let NIV_REIMPLANT = "";     // plan de réimplantation
+// ✅ Variation de niveaux pour la réimplantation APRÈS
+// clé = "A_01", valeur = entier (-2, -1, +1, +2, …)
+let DELTA_NIVEAUX_REIMPLANT = {};
 
 let ACTIVE_FAMILLE = null;
 let SELECTED = new Set();
@@ -43,15 +55,15 @@ const SEUIL_MIN_P80 = 2;
 
 // Familles STRUCTURANTES : interdites en AUTRES
 const STRUCTURING_FAMILIES = new Set([
-  "TA", // Accessoires techniques
+  "TA", // Tuyauterie
   "EL", // Électricité
-  "AC", // Accastillage / coque
+  "AC", // Accastillage
   "RO", // Robinetterie
   "HV", // HVAC
   "CO", // Consommables mécaniques
   "EP", // Équipements
   "IN", // Instrumentation
-  "SE"  // Serrurerie
+  "SE", // Serrurerie
 ]);
 
 /************************************************
@@ -108,7 +120,21 @@ const VIEW = {
   offsetX: 120,
   offsetY: 90
 };
+/* =====================================================
+   CANVAS ACTIF — CANONIQUE
+   (source de vérité absolue)
+===================================================== */
+function getActivePlanCanvas() {
+  if (
+    document
+      .getElementById("tab-reimplantation")
+      ?.classList.contains("active")
+  ) {
+    return document.getElementById("plan2D-reimplantation");
+  }
 
+  return document.getElementById("plan2D-actuel");
+}
 let EMP_INDEX = new Map();
 let IMPLANTATION_ACTIVE = false;
 
@@ -213,12 +239,25 @@ function isPositionValide(travee, position) {
 
 function isNiveauValide(allee, travee, niveau) {
   const key = `${allee}_${String(travee).padStart(2, "0")}`;
-  const max = HAUTEUR_MAX[key];
-  if (!max) return false;
 
-  return niveau.charCodeAt(0) <= max.charCodeAt(0);
+  const isReimplantation =
+    document
+      .getElementById("tab-reimplantation")
+      ?.classList.contains("active");
+
+  const maxNiveau = isReimplantation
+    ? getHauteurReimplant(allee, travee)   // ✅ APRÈS
+    : HAUTEUR_MAX[key];                    // ✅ AVANT
+
+  if (!maxNiveau) return false;
+
+  return niveau.charCodeAt(0) <= maxNiveau.charCodeAt(0);
 }
-
+function isNiveauValideApres(allee, travee, niveau) {
+  const maxNiveau = getHauteurReimplant(allee, travee);
+  if (!maxNiveau) return false;
+  return niveau.charCodeAt(0) <= maxNiveau.charCodeAt(0);
+}
 function emplacementExiste(allee, travee, position, niveau) {
   return (
     ALLEES.includes(allee) &&
@@ -228,7 +267,57 @@ function emplacementExiste(allee, travee, position, niveau) {
     isNiveauValide(allee, travee, niveau)
   );
 }
+function getHauteurReimplant(allee, travee) {
+  const key = `${allee}_${String(travee).padStart(2, "0")}`;
 
+  const base = HAUTEUR_MAX[key];
+  if (!base) return null;
+
+  const delta = DELTA_NIVEAUX_REIMPLANT[key] || 0;
+
+  const baseIdx = base.charCodeAt(0) - 65;
+  const finalIdx = Math.max(0, baseIdx + delta);
+
+  return String.fromCharCode(65 + finalIdx);
+}
+function getSelectedReimpTravees() {
+  const sel = document.getElementById("reimpTravee");
+  if (!sel) return [];
+
+  return [...sel.selectedOptions]
+    .map(o => Number(o.value))
+    .filter(v => !isNaN(v));
+}
+/* =====================================================
+   ZONE PICKING — DÉFINITION CANONIQUE
+   ✅ travées 1 et 2 COMPTÉES
+   ✅ compatible aide / plan / auto-implantation
+===================================================== */
+
+function isZonePicking(e) {
+  if (!e) return false;
+
+  // ✅ on compte TOUTES les travées physiques
+  return emplacementExiste(
+    e.allee,
+    e.travee,
+    e.position,
+    e.niveau
+  );
+}
+function isZoneVisuellementGrisee(e) {
+  if (!e) return true;
+
+  // 🎨 choix métier UI : travées 1 et 2 en grisé
+  if (e.travee <= 2) return true;
+
+  return false;
+}
+function isCheminVisuel(rowIndex) {
+  // lignes vides ajoutées APRÈS travée 2 et APRÈS travée 9
+  return rowIndex === ROW_INDEX.__PASSAGE_2_3
+      || rowIndex === ROW_INDEX.__PASSAGE_9_10;
+}
 /************************************************
  * BLOC A2 — TOOLBAR (INFO SÉLECTION)
  ************************************************/
@@ -247,7 +336,20 @@ function updateToolbarInfo() {
     famInfo.textContent = `Famille active : ${ACTIVE_FAMILLE}`;
   }
 }
+function showAutoProgress(label, pct) {
+  const box = document.getElementById("autoProgress");
+  const bar = document.getElementById("autoProgressBar");
+  const txt = document.getElementById("autoProgressLabel");
 
+  if (box) box.style.display = "block";
+  if (bar) bar.value = pct;
+  if (txt) txt.textContent = label;
+}
+
+function hideAutoProgress() {
+  const box = document.getElementById("autoProgress");
+  if (box) box.style.display = "none";
+}
 console.log("✅ BLOC A2 chargé");
 
 /************************************************
@@ -279,12 +381,14 @@ function nextFrame() {
 }
 
 function showLoader() {
+  document.body.classList.add("loading");   // ✅ AJOUT
   const loader = document.getElementById("loader");
   if (loader) loader.classList.remove("hidden");
   setLoaderProgress(0, "Initialisation…");
 }
 
 function hideLoader() {
+  document.body.classList.remove("loading"); // ✅ AJOUT
   const loader = document.getElementById("loader");
   if (loader) loader.classList.add("hidden");
 }
@@ -428,98 +532,119 @@ function labelFamillePosition(famille) {
   return famille || "";
 }
 
+function getFamilleImplantation(familleBrute) {
+  if (!familleBrute) return "AUT";
+
+  // Normalisation obligatoire
+  const fam = normalizeFamilleCode(familleBrute);
+
+  // Familles réellement structurantes (nouvelle règle)
+  if (STRUCTURING_FAMILIES.has(fam)) {
+    return fam;
+  }
+
+  // Tout le reste (CL, CS, PE, OU, etc.)
+  return "AUT";
+}
+
+/************************************************
+ * BESOIN STOCK — PARTITION STRICTE PAR EMPLACEMENT
+ * ✅ La somme = nb d’emplacements occupés
+ ************************************************/
+
 function normalizeFamilleCode(rawFam) {
   if (rawFam == null) return "VIDE";
 
+  /* =====================================================
+     1️⃣ NORMALISATION SYNTAXIQUE FORTE
+  ===================================================== */
+
   const txt = rawFam
     .toString()
-    .replace(/[\u00A0]/g, " ") // ✅ espace insécable → espace normal
-    .replace(/\s+/g, "")       // ✅ supprime TOUS les blancs
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")   // accents
+    .replace(/[\u00A0]/g, " ")        // espaces insécables
+    .replace(/\s+/g, "")              // tous les espaces
     .toUpperCase();
 
   if (!txt) return "VIDE";
 
-  if (/^SE\d+$/.test(txt)) return "SE";
-  if (txt.startsWith("SEM")) return "SEM";
+  /* =====================================================
+     2️⃣ RÈGLES MÉTIER STRUCTURANTES (BLINDÉES)
+     👉 Toute variante raisonnable → famille canonique
+  ===================================================== */
 
-  const code = txt.replace(/[0-9]/g, "");
-  return code || "VIDE";
-}
-
-function computeFinalFamily(code) {
-  if (!code) return "AUT";
-
-  if (STRUCTURING_FAMILIES.has(code)) {
-    return code;
+  // 🔥 CONTRÔLE
+  // CL, CL1, CL3, CL-02, CL_4, CLX (si un jour), etc.
+  if (/^CL[A-Z0-9._-]*$/.test(txt)) {
+    return "CL";
   }
+
+  // 🔧 TUYAUTERIE
+  // TA, TA1, GA, GA2, GA-01
+  if (/^(TA|GA)[A-Z0-9._-]*$/.test(txt)) {
+    return "TA";
+  }
+
+  // ⚡ ÉLECTRICITÉ
+  // EL, EL1, ELA, ELA2
+  if (/^(EL|ELA)[A-Z0-9._-]*$/.test(txt)) {
+    return "EL";
+  }
+
+  // 🛠️ ACCASTILLAGE / COQUE
+  // AC, ACL, ACA, ACH, AC1, ACL5
+  if (/^(AC|ACL|ACA|ACH)[A-Z0-9._-]*$/.test(txt)) {
+    return "AC";
+  }
+
+  // 🚿 ROBINETTERIE
+  if (/^RO[A-Z0-9._-]*$/.test(txt)) {
+    return "RO";
+  }
+
+  // ❄️ HVAC
+  if (/^HV[A-Z0-9._-]*$/.test(txt)) {
+    return "HV";
+  }
+
+  // 📦 CONSOMMABLES
+  if (/^CO[A-Z0-9._-]*$/.test(txt)) {
+    return "CO";
+  }
+
+  // ⚙️ ÉQUIPEMENTS
+  if (/^EP[A-Z0-9._-]*$/.test(txt)) {
+    return "EP";
+  }
+
+  // 📐 INSTRUMENTATION
+  if (/^IN[A-Z0-9._-]*$/.test(txt)) {
+    return "IN";
+  }
+
+  // 🔩 SERRURERIE
+  // SE1, SE2, SEM, SEM3
+  if (/^(SE|SEM)[A-Z0-9._-]*$/.test(txt)) {
+    return "SE";
+  }
+
+  // 🏗️ CHANTIER
+  if (/^CS[A-Z0-9._-]*$/.test(txt)) {
+    return "CS";
+  }
+
+  /* =====================================================
+     3️⃣ AUT — GESTION CONTRÔLÉE (IMPORTANT)
+  ===================================================== */
+
+  // À ce stade :
+  // - ce n’est AUCUNE famille structurante connue
+  // - ce n’est pas VIDE
+  // 👉 donc AUT par définition métier
 
   return "AUT";
 }
-
-function getFamilleImplantation(familleBrute) {
-  if (!familleBrute) return "AUT";
-
-  return STRUCTURING_FAMILIES.has(familleBrute)
-    ? familleBrute
-    : "AUT";
-}
-
-/************************************************
- * BESOIN EMPLACEMENTS — STOCK RÉEL (AVEC DORMANT)
- ************************************************/
-
-function computeStockNeedByFamille(stockRows) {
-  const need = {};
-
-  if (!Array.isArray(stockRows)) return need;
-
-  /* =========================
-     1) REGROUPEMENT PAR EMPLACEMENT
-  ========================= */
-
-  const empToFams = {}; // empId -> Set(familles)
-
-  stockRows.forEach(row => {
-    const article = row["Article"];
-    const empRaw = row["Emplacement"] || row["Emplacement stock"] || row["EMPLACEMENT"];
-    const qty = Number(row["Stock disponible"]) || 0;
-
-    if (!article || !empRaw || qty <= 0) return;
-
-    const famBrute = ARTICLE_DATA[article]?.famille || "AUT";
-    const fam = getFamilleImplantation(famBrute);
-
-    const empId = empRaw.toString().trim();
-    if (!empId) return;
-
-    empToFams[empId] ??= new Set();
-    empToFams[empId].add(fam);
-  });
-
-  /* =========================
-     2) PARTAGE DE L’EMPLACEMENT
-  ========================= */
-
-  Object.values(empToFams).forEach(famsSet => {
-    const fams = Array.from(famsSet);
-    const part = 1 / fams.length; // ex : 4 familles → 0.25
-
-    fams.forEach(fam => {
-      need[fam] = (need[fam] || 0) + part;
-    });
-  });
-
-  /* =========================
-     3) ARRONDI FINAL (SÉCURITÉ)
-  ========================= */
-
-  Object.keys(need).forEach(fam => {
-    need[fam] = Math.ceil(need[fam]);
-  });
-
-  return need;
-}
-
 
 console.log("✅ BLOC D chargé");
 
@@ -528,13 +653,6 @@ console.log("✅ BLOC D chargé");
  * BLOC E — MODÈLE ENTREPÔT (EMPLACEMENTS)
  ************************************************/
 
-/**
- * Initialise EMPLACEMENTS à partir du DT
- * (uniquement les emplacements réellement présents)
- *
- * @param {Array<Object>} rows - lignes du DT (sheet_to_json)
- * @param {string} empCol - nom de la colonne "emplacement"
- */
 function initEmplacementsFromDT(rows, empCol) {
   EMPLACEMENTS = {};
 
@@ -569,7 +687,61 @@ if (!emplacementExiste(
     Object.keys(EMPLACEMENTS).length
   );
 }
+/**
+ * Initialise les emplacements physiques depuis le fichier STOCK
+ * (même logique que le DT, mais source différente)
+ */
+function initEmplacementsFromStock() {
+  EMPLACEMENTS_STOCK = {};
 
+  STOCK_ROWS.forEach(row => {
+    const raw =
+      row["Emplacement"] ||
+      row["Emplacement stock"] ||
+      row["EMPLACEMENT"];
+
+    const parsed = parseEmplacement(raw);
+    if (!parsed) return;
+
+    if (!emplacementExiste(
+      parsed.allee,
+      parsed.travee,
+      parsed.position,
+      parsed.niveau
+    )) return;
+
+    EMPLACEMENTS_STOCK[parsed.empId] = {
+      allee: parsed.allee,
+      travee: parsed.travee,
+      position: parsed.position,
+      niveau: parsed.niveau
+    };
+  });
+
+  console.log(
+    "✅ EMPLACEMENTS_STOCK initialisés depuis STOCK :",
+    Object.keys(EMPLACEMENTS_STOCK).length
+  );
+}
+function rebuildStockByEmpIndex() {
+  STOCK_BY_EMP = {};
+
+  STOCK_ROWS.forEach(row => {
+    const raw =
+      row["Emplacement"] ||
+      row["Emplacement stock"] ||
+      row["EMPLACEMENT"];
+
+    const parsed = parseEmplacement(raw);
+    if (!parsed) return;
+
+    const empId = parsed.empId;
+    STOCK_BY_EMP[empId] ??= [];
+    STOCK_BY_EMP[empId].push(row);
+  });
+
+  console.log("✅ STOCK_BY_EMP indexé :", Object.keys(STOCK_BY_EMP).length);
+}
 /**
  * Complète un niveau pour avoir TOUTES les cases :
  * - Allées A → N
@@ -605,6 +777,31 @@ function ensureFullLevel(niveau) {
   }
 
   console.log(`✅ Niveau ${niv} complété (emplacements physiques uniquement)`);
+}
+function ensureAllPhysicalEmplacements() {
+  const niveaux = new Set();
+
+  // récupérer TOUS les niveaux physiquement possibles
+  ALLEES.split("").forEach(allee => {
+    for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
+      const key = `${allee}_${String(tr).padStart(2, "0")}`;
+      const max = HAUTEUR_MAX[key];
+      if (!max) continue;
+
+      for (
+        let n = "A";
+        n <= max;
+        n = String.fromCharCode(n.charCodeAt(0) + 1)
+      ) {
+        niveaux.add(n);
+      }
+    }
+  });
+
+  // créer TOUS les emplacements physiques
+  niveaux.forEach(niv => ensureFullLevel(niv));
+
+  console.log("✅ Tous les emplacements physiques garantis");
 }
 
 /**
@@ -676,11 +873,101 @@ document.getElementById("applyHeight")?.addEventListener("click", () => {
   console.log("✅ Hauteur max modifiée :", key, niveau);
 
   rebuildEmpIndex();
-  resizeImplantationCanvas();
   drawZonePlan();
-  drawHeatmapAvant("plan2D");
+  resizeImplantationCanvas();
+  
+  drawHeatmapAvant();
 });
+/* =========================
+   ESPACE — BASE PHYSIQUE
+========================= */
 
+function countPhysicalEmplacements() {
+  return Object.values(EMPLACEMENTS)
+    .filter(e => isZonePicking(e)).length;
+}
+
+function countStockOccupiedEmplacements() {
+  const set = new Set();
+
+  Object.keys(STOCK_BY_EMP || {}).forEach(empId => {
+    if (STOCK_BY_EMP[empId]?.length) set.add(empId);
+  });
+
+  return set.size;
+}
+/* =========================
+   SNAPSHOT ESPACE
+========================= */
+
+function computeSpaceSnapshot(emplacements, stockByEmp) {
+  const phys = Object.values(emplacements)
+    .filter(e => isZonePicking(e));
+
+  const total = phys.length;
+
+  const occupiedSet = new Set();
+  Object.entries(stockByEmp || {}).forEach(([empId, rows]) => {
+    if (rows && rows.length) occupiedSet.add(empId);
+  });
+
+  const occupied = occupiedSet.size;
+  const free = Math.max(0, total - occupied);
+
+  return {
+    total,
+    occupied,
+    free,
+    surfaceTotal: total * SURFACE_PAR_EMPLACEMENT,
+    surfaceOccupied: occupied * SURFACE_PAR_EMPLACEMENT,
+    surfaceFree: free * SURFACE_PAR_EMPLACEMENT,
+    tauxUtilisation: total ? (occupied / total) * 100 : 0
+  };
+}
+// ✅ SNAPSHOT ESPACE — APRÈS (INDÉPENDANT UI)
+function computeSpaceSnapshotApres(emplacements, stockByEmp) {
+  const phys = Object.values(emplacements)
+    .filter(e =>
+      ALLEES.includes(e.allee) &&
+      isPositionValide(e.travee, e.position) &&
+      isNiveauValideApres(e.allee, e.travee, e.niveau) // 🔑 clé
+    );
+
+  const total = phys.length;
+
+  const occupiedSet = new Set();
+  Object.entries(stockByEmp || {}).forEach(([empId, rows]) => {
+    if (rows && rows.length) occupiedSet.add(empId);
+  });
+
+  const occupied = occupiedSet.size;
+  const free = Math.max(0, total - occupied);
+
+  return {
+    total,
+    occupied,
+    free,
+    surfaceTotal: total * SURFACE_PAR_EMPLACEMENT,
+    surfaceOccupied: occupied * SURFACE_PAR_EMPLACEMENT,
+    surfaceFree: free * SURFACE_PAR_EMPLACEMENT,
+    tauxUtilisation: total ? (occupied / total) * 100 : 0
+  };
+}
+function computeSpaceMetrics() {
+  const total = countPhysicalEmplacements();
+  const occupied = countStockOccupiedEmplacements();
+  const free = Math.max(0, total - occupied);
+
+  return {
+    total,
+    occupied,
+    free,
+    surfaceTotal: total * SURFACE_PAR_EMPLACEMENT,
+    surfaceOccupied: occupied * SURFACE_PAR_EMPLACEMENT,
+    surfaceFree: free * SURFACE_PAR_EMPLACEMENT,
+    tauxUtilisation: total > 0 ? (occupied / total) * 100 : 0
+  };
+}
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC F — INDEX DE CLIC & MAPPING SOURIS → EMPID
@@ -698,41 +985,31 @@ function rebuildPhysicalGrid(niveau) {
   let row = 0;
 
   for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
-
-    // ✅ lignes physiques de la travée
     for (let pos of POSITIONS_PAR_DEFAUT) {
-
-      let ligneExiste = false;
-      for (let ai = 0; ai < ALLEES.length; ai++) {
-        if (emplacementExiste(ALLEES[ai], tr, pos, niveau)) {
-          ligneExiste = true;
-          break;
-        }
-      }
-      if (!ligneExiste) continue;
-
-      for (let ai = 0; ai < ALLEES.length; ai++) {
-        const allee = ALLEES[ai];
-        if (!emplacementExiste(allee, tr, pos, niveau)) continue;
-        ROW_INDEX[`${allee}|${tr}|${pos}`] = row;
-      }
-
-      row++;
+      ROW_INDEX[`${tr}|${pos}`] = row++;
     }
 
-    // ✅ ALLÉES DE PASSAGE VISUELLES
-    if (tr === 2 || tr === 9) {
-      row++; // ligne vide
-    }
+    if (tr === 2) ROW_INDEX.__PASSAGE_2_3 = row++;
+    if (tr === 9) ROW_INDEX.__PASSAGE_9_10 = row++;
   }
 
   ROWS_TOTAL = row;
-  console.log("✅ Grille physique avec passages :", ROWS_TOTAL, "lignes");
+}
+
+/* =====================================================
+   DÉTECTION DES LIGNES DE CHEMIN (VISUEL UNIQUEMENT)
+===================================================== */
+
+function isCheminRow(row) {
+  return (
+    row === ROW_INDEX.__PASSAGE_2_3 ||
+    row === ROW_INDEX.__PASSAGE_9_10
+  );
 }
 
 function getTraveeMidRow(travee) {
   const rows = Object.entries(ROW_INDEX)
-    .filter(([key]) => Number(key.split("|")[1]) === travee)
+    .filter(([key]) => Number(key.split("|")[0]) === travee)
     .map(([, row]) => row);
 
   if (!rows.length) return null;
@@ -748,10 +1025,10 @@ function getTraveeMidRow(travee) {
 function rebuildEmpIndex() {
   EMP_INDEX.clear();
 
-  const niveau = FILTERS.niveau;
+  // ✅ INDEX UNIQUEMENT POUR LA RÉIMPLANTATION
+  const niveau = NIV_REIMPLANT;
   if (!niveau) return;
 
-  // ✅ CONSTRUCTION DE LA GRILLE PHYSIQUE
   rebuildPhysicalGrid(niveau);
 
   for (let ai = 0; ai < ALLEES.length; ai++) {
@@ -762,19 +1039,19 @@ function rebuildEmpIndex() {
 
         if (!emplacementExiste(allee, tr, pos, niveau)) continue;
 
-        const row = ROW_INDEX[`${allee}|${tr}|${pos}`];
+        const row = ROW_INDEX[`${tr}|${pos}`];
         if (row == null) continue;
 
-        const key = `${niveau}|${ai}|${row}`;
         const empId = `${allee}${String(tr).padStart(2, "0")}${niveau}${pos}`;
+        const key = `${niveau}|${ai}|${row}`;
+
         EMP_INDEX.set(key, empId);
       }
     }
   }
 
-  console.log("✅ EMP_INDEX physique :", EMP_INDEX.size);
+  console.log("✅ EMP_INDEX reconstruit (réimplantation) :", EMP_INDEX.size);
 }
-
 /**
  * Convertit une position souris en cellule écran
  * @returns {{alleeIndex:number, row:number}|null}
@@ -790,7 +1067,7 @@ function getScreenCellFromMouse(canvas, ev) {
   const row = Math.floor(py / VIEW.cellH);
 
   const maxAllees = ALLEES.length;
-  const maxRows = (TRAVEE_MAX - TRAVEE_MIN + 1) * POSITIONS;
+  const maxRows = ROWS_TOTAL;
 
   if (alleeIndex < 0 || alleeIndex >= maxAllees) return null;
   if (row < 0 || row >= maxRows) return null;
@@ -805,7 +1082,7 @@ function getEmpIdFromMouse(canvas, ev) {
   const cell = getScreenCellFromMouse(canvas, ev);
   if (!cell) return null;
 
-  const key = `${FILTERS.niveau}|${cell.alleeIndex}|${cell.row}`;
+  const key = `${NIV_REIMPLANT}|${cell.alleeIndex}|${cell.row}`;
   return EMP_INDEX.get(key) || null;
 }
 
@@ -942,16 +1219,12 @@ console.log("✅ BLOC G chargé");
  * À appeler après chargement du DT
  */
 function resizeHeatmapCanvas() {
-  const canvas = document.getElementById("plan2D");
-  if (!canvas) return;
+  const heat = document.getElementById("heatmap2D");
+  const plan = document.getElementById("plan2D-actuel");
+  if (!heat || !plan) return;
 
-  const cols = ALLEES.length;
-  const rows = (TRAVEE_MAX - TRAVEE_MIN + 1) * POSITIONS;
-
-  canvas.width  = VIEW.offsetX + cols * VIEW.cellW + 220;
-  canvas.height = VIEW.offsetY + rows * VIEW.cellH + 60;
-
-  console.log("✅ Heatmap canvas dimensionné :", canvas.width, canvas.height);
+  heat.width  = plan.width;
+  heat.height = plan.height;
 }
 
 /**
@@ -976,59 +1249,84 @@ function heatGradient01(t) {
 /**
  * Dessine la heatmap AVANT
  */
-function drawHeatmapAvant(canvasId = "plan2D") {
-  const canvas = document.getElementById(canvasId);
+
+function drawHeatmapAvant() {
+  const canvas = document.getElementById("heatmap2D");
   if (!canvas) return;
 
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const niveau = FILTERS.niveau;
-  if (!niveau) {
-    ctx.fillStyle = "#000";
-    ctx.font = "14px Arial";
-    ctx.fillText("Sélectionne un niveau", 20, 30);
-    return;
-  }
+  const niveau = NIV_ACTUEL;
+  if (!niveau) return;
+
 
   /* =========================
      TITRE
   ========================= */
 
+  ctx.save();
+  ctx.globalAlpha = 1;
   ctx.fillStyle = "#000";
-  ctx.font = "bold 14px Arial";
+  ctx.font = "bold 13px Arial";
   ctx.textAlign = "left";
-  ctx.fillText(`Heatmap AVANT — Niveau ${niveau}`, 20, 30);
+  ctx.fillText(
+    `Heatmap AVANT — Niveau ${niveau}`,
+    VIEW.offsetX,
+    VIEW.offsetY - 50
+  );
+  ctx.restore();
 
   /* =========================
-     LÉGENDES
+     LÉGENDES — ALLÉES (A → N)
   ========================= */
 
-  // Allées (X)
+  ctx.save();
+  ctx.fillStyle = "#000";
   ctx.font = "bold 12px Arial";
   ctx.textAlign = "center";
+
   for (let ai = 0; ai < ALLEES.length; ai++) {
-    const x = VIEW.offsetX + ai * VIEW.cellW + VIEW.cellW / 2;
-    ctx.fillText(ALLEES[ai], x, VIEW.offsetY - 22);
-  }
+    const x =
+      VIEW.offsetX +
+      ai * VIEW.cellW +
+      VIEW.cellW / 2;
 
-  // Positions (Y)
-  ctx.font = "11px Arial";
-  ctx.textAlign = "right";
-  for (let p = 1; p <= POSITIONS; p++) {
-    const y = VIEW.offsetY + (p - 0.5) * VIEW.cellH;
-    ctx.fillText(`P${p}`, VIEW.offsetX - 45, y);
+    ctx.fillText(
+      ALLEES[ai],
+      x,
+      VIEW.offsetY - 18
+    );
   }
-
-  // Travées
-  for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
-    const baseRow = (tr - TRAVEE_MIN) * POSITIONS;
-    const yMid = VIEW.offsetY + (baseRow + POSITIONS / 2) * VIEW.cellH;
-    ctx.fillText(String(tr), VIEW.offsetX - 12, yMid);
-  }
+  ctx.restore();
 
   /* =========================
-     NORMALISATION
+     LÉGENDES — TRAVÉES (1 → 16)
+  ========================= */
+
+  ctx.save();
+  ctx.font = "11px Arial";
+  ctx.fillStyle = "#000";
+  ctx.textAlign = "right";
+
+  for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
+    const midRow = getTraveeMidRow(tr);
+    if (midRow == null) continue;
+
+    const y =
+      VIEW.offsetY +
+      (midRow + 0.5) * VIEW.cellH;
+
+    ctx.fillText(
+      String(tr),
+      VIEW.offsetX - 10,
+      y
+    );
+  }
+  ctx.restore();
+
+  /* =========================
+     NORMALISATION DES FRÉQUENCES
   ========================= */
 
   let maxFreq = 1;
@@ -1041,7 +1339,7 @@ function drawHeatmapAvant(canvasId = "plan2D") {
   });
 
   /* =========================
-     DESSIN HEATMAP
+     DESSIN DE LA HEATMAP
   ========================= */
 
   Object.entries(HEATMAP).forEach(([empId, freq]) => {
@@ -1052,15 +1350,24 @@ function drawHeatmapAvant(canvasId = "plan2D") {
     const ai = ALLEES.indexOf(e.allee);
     if (ai < 0) return;
 
-    const row = ROW_INDEX[`${e.allee}|${e.travee}|${e.position}`];
-if (row == null) return;
+    const row = ROW_INDEX[`${e.travee}|${e.position}`];
+    if (row == null) return;
+
     const t = Math.log(freq + 1) / Math.log(maxFreq + 1);
 
     const x = VIEW.offsetX + ai * VIEW.cellW;
     const y = VIEW.offsetY + row * VIEW.cellH;
 
     ctx.fillStyle = heatGradient01(t);
-    ctx.fillRect(x + 1, y + 1, VIEW.cellW - 2, VIEW.cellH - 2);
+    const cellKey = `${FILTERS.niveau}|${ai}|${row}`;
+    
+
+    ctx.fillRect(
+      x + 1,
+      y + 1,
+      VIEW.cellW - 2,
+      VIEW.cellH - 2
+    );
   });
 }
 
@@ -1152,7 +1459,7 @@ for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
     const ai = ALLEES.indexOf(e.allee);
     if (ai < 0) return;
 
-    const row = ROW_INDEX[`${e.allee}|${e.travee}|${e.position}`];
+    const row = ROW_INDEX[`${e.travee}|${e.position}`];
 if (row == null) return;
     const t = Math.log(freq + 1) / Math.log(maxFreq + 1);
 
@@ -1182,20 +1489,25 @@ function empMatchesFamille(empId, famille) {
 /**
  * Dessine le plan d’implantation
  */
+
 function drawZonePlan() {
-  const canvas = document.getElementById("plan2D-interactif");
+  const canvas = getActivePlanCanvas();
   if (!canvas) return;
+
+  const isReimplantation =
+    document
+      .getElementById("tab-reimplantation")
+      ?.classList.contains("active");
+
+  const niveau = isReimplantation ? NIV_REIMPLANT : NIV_ACTUEL;
+  if (!niveau) return;
+
+  if (isReimplantation && ROWS_TOTAL === 0) {
+    rebuildEmpIndex();
+  }
 
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const niveau = FILTERS.niveau;
-  if (!niveau) {
-    ctx.fillStyle = "#000";
-    ctx.font = "14px Arial";
-    ctx.fillText("Sélectionne un niveau", 20, 30);
-    return;
-  }
 
   /* ===== TITRE ===== */
   ctx.fillStyle = "#000";
@@ -1218,58 +1530,87 @@ function drawZonePlan() {
     ctx.fillText(ALLEES[ai], x, VIEW.offsetY - 22);
   }
 
-  // Travées (centrées dynamiquement)
+  // Positions
   ctx.font = "11px Arial";
   ctx.textAlign = "right";
 
+  // Travées (basées sur la grille réelle)
   for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
-    const midRow = getTraveeMidRow(tr);
-    if (midRow == null) continue;
+    const rows = Object.entries(ROW_INDEX)
+      .filter(([k]) => k.startsWith(`${tr}|`))
+      .map(([, r]) => r);
 
-    const y = VIEW.offsetY + (midRow + 0.5) * VIEW.cellH;
-    ctx.fillText(String(tr), VIEW.offsetX - 12, y);
+    if (!rows.length) continue;
+    const yMid =
+      VIEW.offsetY +
+      ((Math.min(...rows) + Math.max(...rows)) / 2) * VIEW.cellH;
+
+    ctx.fillText(String(tr), VIEW.offsetX - 12, yMid);
   }
 
- // === Séparateurs de travées (léger) ===
-ctx.strokeStyle = "#e0e0e0";
-ctx.lineWidth = 1;
+  /* ===== DESSIN DES CHEMINS (LIGNES VIDES) ===== */
 
-for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
-  const midRow = getTraveeMidRow(tr);
-  if (midRow == null) continue;
+const cheminRows = [
+  ROW_INDEX.__PASSAGE_2_3,
+  ROW_INDEX.__PASSAGE_9_10
+].filter(r => r != null);
 
-  const y =
-    VIEW.offsetY +
-    (midRow + 0.5) * VIEW.cellH +
-    VIEW.cellH / 2;
+cheminRows.forEach(row => {
+  const y = VIEW.offsetY + row * VIEW.cellH;
 
-  ctx.beginPath();
-  ctx.moveTo(VIEW.offsetX - 40, y);
-  ctx.lineTo(VIEW.offsetX + ALLEES.length * VIEW.cellW, y);
-  ctx.stroke();
-}
+  ctx.save();
+  ctx.fillStyle = "#d0d0d0";
+  ctx.globalAlpha = 0.85;
+
+  ctx.fillRect(
+    VIEW.offsetX,
+    y,
+    ALLEES.length * VIEW.cellW,
+    VIEW.cellH
+  );
+
+  ctx.restore();
+});
 
   /* ===== DESSIN DES CASES ===== */
 
   for (let ai = 0; ai < ALLEES.length; ai++) {
     const allee = ALLEES[ai];
 
-    Object.entries(ROW_INDEX)
-      .filter(([key]) => key.startsWith(`${allee}|`))
-      .forEach(([key, row]) => {
-        const [, tr, pos] = key.split("|").map(v => isNaN(v) ? v : Number(v));
-        const empId = `${allee}${String(tr).padStart(2, "0")}${niveau}${pos}`;
+    for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
+      for (let pos = 1; pos <= POSITIONS; pos++) {
 
+        const row = ROW_INDEX[`${tr}|${pos}`];
+        if (row == null) continue;
+
+        const empId = `${allee}${String(tr).padStart(2, "0")}${niveau}${pos}`;
         const e = EMPLACEMENTS[empId];
-        const famille = e?.famille || null;
-        const filteredOut = !empMatchesFamille(empId, FILTERS.famille);
 
         const x = VIEW.offsetX + ai * VIEW.cellW;
         const y = VIEW.offsetY + row * VIEW.cellH;
 
+        const famille = e?.famille || null;
+        const filteredOut = !empMatchesFamille(empId, FILTERS.famille);
+
+        /* ===== FOND FAMILLE ===== */
         ctx.fillStyle = filteredOut ? "#ffffff" : colorByFamille(famille);
         ctx.fillRect(x + 1, y + 1, VIEW.cellW - 2, VIEW.cellH - 2);
 
+        /* ===== CHEMIN VISUEL (GRISÉ UNIQUEMENT) ===== */
+        if (isCheminRow(row)) {
+          ctx.save();
+          ctx.globalAlpha = 0.55;
+          ctx.fillStyle = "#9e9e9e";
+          ctx.fillRect(
+            x + 1,
+            y + 1,
+            VIEW.cellW - 2,
+            VIEW.cellH - 2
+          );
+          ctx.restore();
+        }
+
+        /* ===== SÉLECTION ===== */
         if (SELECTED.has(empId)) {
           ctx.strokeStyle = "#0066ff";
           ctx.lineWidth = 2;
@@ -1277,6 +1618,7 @@ for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
           ctx.lineWidth = 1;
         }
 
+        /* ===== TEXTE FAMILLE ===== */
         if (famille && !filteredOut) {
           ctx.fillStyle = "#000";
           ctx.font = "bold 10px Arial";
@@ -1288,12 +1630,74 @@ for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
             y + VIEW.cellH / 2
           );
         }
-      });
+      }
+    }
+  }
+/* =========================
+   DEBUG VISUEL (ROWS / PASSAGES / EMPID)
+========================= */
+if (window.DEBUG_PLAN) {
+  ctx.save();
+
+  /* === DEBUG ROWS === */
+  ctx.font = "10px monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+
+  for (let row = 0; row < ROWS_TOTAL; row++) {
+    const y = VIEW.offsetY + row * VIEW.cellH;
+
+    // Fond alterné
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = row % 2 === 0 ? "#0099ff" : "#ff3300";
+    ctx.fillRect(
+      VIEW.offsetX,
+      y,
+      ALLEES.length * VIEW.cellW,
+      VIEW.cellH
+    );
+
+    // Label row
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#000";
+    ctx.fillText(`row ${row}`, 6, y + 2);
+
+    // Passage
+    if (isCheminRow(row)) {
+      ctx.fillStyle = "red";
+      ctx.fillText("PASSAGE", 60, y + 2);
+    }
   }
 
+  /* === DEBUG EMPID === */
+  ctx.font = "9px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (let ai = 0; ai < ALLEES.length; ai++) {
+    for (let row = 0; row < ROWS_TOTAL; row++) {
+      const key = `${NIV_REIMPLANT}|${ai}|${row}`;
+      const empId = EMP_INDEX.get(key);
+      if (!empId) continue;
+
+      const x =
+        VIEW.offsetX + ai * VIEW.cellW + VIEW.cellW / 2;
+      const y =
+        VIEW.offsetY + row * VIEW.cellH + VIEW.cellH / 2;
+
+      ctx.fillStyle = "#000";
+      ctx.fillText(empId, x, y);
+    }
+  }
+
+  ctx.restore();
+}
   updateToolbarInfo();
 }
 
+console.log("ROWS_TOTAL =", ROWS_TOTAL);
+console.log("ROW_INDEX keys", Object.keys(ROW_INDEX).slice(0,10));
+console.log("EMP_INDEX size", EMP_INDEX.size);
 console.log("✅ BLOC I chargé");
 
 function updateAutDetails() {
@@ -1306,59 +1710,23 @@ function updateAutDetails() {
   }
 
   box.innerHTML = Object.entries(AUT_GEST_DETAILS)
-    .sort((a, b) => b[1] - a[1])
-    .map(([fam, n]) => `<div><b>${fam}</b> : ${n}</div>`)
-    .join("");
+  .filter(([fam]) => fam !== "AUT") // ✅ AUT n’est pas un GEST métier
+  .sort((a, b) => b[1] - a[1])
+  .map(([fam, n]) => `<div><b>${fam}</b> : ${n}</div>`)
+  .join("");
 }
 
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC J — INTERACTION PLAN (FAMILLE ONLY)
+ * ✅ Basé UNIQUEMENT sur ROW_INDEX + EMP_INDEX
  ************************************************/
 
 let DRAG_START = null;
 let DRAG_IN_PROGRESS = false;
 
 /**
- * Convertit la position souris en cellule écran
- */
-function getCellFromMouse(canvas, ev) {
-  const rect = canvas.getBoundingClientRect();
-  const px = ev.clientX - rect.left - VIEW.offsetX;
-  const py = ev.clientY - rect.top - VIEW.offsetY;
-
-  if (px < 0 || py < 0) return null;
-
-  const alleeIndex = Math.floor(px / VIEW.cellW);
-  const row = Math.floor(py / VIEW.cellH);
-
-  const maxAllees = ALLEES.length;
-  const maxRows = (TRAVEE_MAX - TRAVEE_MIN + 1) * POSITIONS;
-
-  if (alleeIndex < 0 || alleeIndex >= maxAllees) return null;
-  if (row < 0 || row >= maxRows) return null;
-
-  return { alleeIndex, row };
-}
-
-/**
- * Convertit une cellule écran en empId métier
- */
-function empIdFromCell(cell) {
-  const niveau = FILTERS.niveau;
-  if (!niveau) return null;
-
-  const allee = ALLEES[cell.alleeIndex];
-  const travee = TRAVEE_MIN + Math.floor(cell.row / POSITIONS);
-  const position = 1 + (cell.row % POSITIONS);
-
-  if (!emplacementExiste(allee, travee, position, niveau)) return null;
-
-return `${allee}${String(travee).padStart(2,"0")}${niveau}${position}`;
-}
-
-/**
- * Sélection par rectangle
+ * Sélection par rectangle (mapping CANONIQUE)
  */
 function selectRectangle(c1, c2, additive) {
   if (!additive) SELECTED.clear();
@@ -1370,10 +1738,9 @@ function selectRectangle(c1, c2, additive) {
 
   for (let ai = minA; ai <= maxA; ai++) {
     for (let r = minR; r <= maxR; r++) {
-      const empId = empIdFromCell({ alleeIndex: ai, row: r });
-      if (empId && EMPLACEMENTS[empId]) {
-        SELECTED.add(empId);
-      }
+      const key = `${NIV_REIMPLANT}|${ai}|${r}`;
+      const empId = EMP_INDEX.get(key);
+      if (empId) SELECTED.add(empId);
     }
   }
 }
@@ -1382,27 +1749,29 @@ function selectRectangle(c1, c2, additive) {
  * Bind des interactions souris (UNE SEULE FOIS)
  */
 function bindPlanInteractionOnce() {
-  const canvas = document.getElementById("plan2D-interactif");
+  const canvas = document.getElementById("plan2D-reimplantation");
   if (!canvas) return;
 
   if (canvas.dataset.bound === "1") return;
   canvas.dataset.bound = "1";
+  canvas.style.pointerEvents = "auto";
 
-  // Début drag
+  /* ===== DÉBUT DRAG ===== */
   canvas.addEventListener("mousedown", ev => {
     if (ev.button !== 0) return;
-    const cell = getCellFromMouse(canvas, ev);
+
+    const cell = getScreenCellFromMouse(canvas, ev);
     if (!cell) return;
 
     DRAG_START = cell;
     DRAG_IN_PROGRESS = false;
   });
 
-  // Fin drag → sélection rectangle
+  /* ===== FIN DRAG → SÉLECTION RECTANGLE ===== */
   canvas.addEventListener("mouseup", ev => {
     if (!DRAG_START) return;
 
-    const endCell = getCellFromMouse(canvas, ev);
+    const endCell = getScreenCellFromMouse(canvas, ev);
     if (!endCell) {
       DRAG_START = null;
       return;
@@ -1413,62 +1782,85 @@ function bindPlanInteractionOnce() {
     DRAG_START = null;
 
     drawZonePlan();
-    computeAideImplantation();
   });
 
-  // Clic simple
+  /* ===== CLIC SIMPLE ===== */
   canvas.addEventListener("click", ev => {
     if (DRAG_IN_PROGRESS) {
       DRAG_IN_PROGRESS = false;
-      return; // empêche le clic fantôme après drag
+      return; // évite clic fantôme après drag
     }
 
-    const cell = getCellFromMouse(canvas, ev);
-    if (!cell) return;
-
-    const empId = empIdFromCell(cell);
-    if (!empId || !EMPLACEMENTS[empId]) return;
+    const empId = getEmpIdFromMouse(canvas, ev);
+    if (!empId) return;
 
     if (ev.shiftKey) {
-      if (SELECTED.has(empId)) SELECTED.delete(empId);
-      else SELECTED.add(empId);
+      SELECTED.has(empId)
+        ? SELECTED.delete(empId)
+        : SELECTED.add(empId);
     } else {
       SELECTED.clear();
       SELECTED.add(empId);
     }
 
     drawZonePlan();
-    computeAideImplantation();
   });
 
-  // Bouton : vider sélection
+  /* ===== VIDER SÉLECTION ===== */
   document.getElementById("btnClearSel")?.addEventListener("click", () => {
     SELECTED.clear();
     drawZonePlan();
     computeAideImplantation();
   });
 
-  // Bouton : appliquer / effacer famille
+  /* ===== APPLIQUER FAMILLE ===== */
   document.getElementById("btnApply")?.addEventListener("click", () => {
     if (SELECTED.size === 0) {
       alert("Sélectionne au moins une case.");
       return;
     }
 
+    IMPLANTATION_ACTIVE = true;
+
+    const niveauSource = FILTERS.niveau;
+    const niveauxCibles = getExistingLevels();
+
+    // 1️⃣ Pose sur le niveau courant
     SELECTED.forEach(empId => {
       if (EMPLACEMENTS[empId]) {
-        EMPLACEMENTS[empId].famille = ACTIVE_FAMILLE; // null = effacer
+        EMPLACEMENTS[empId].famille = ACTIVE_FAMILLE;
       }
     });
 
-    IMPLANTATION_ACTIVE = true;
+    // 2️⃣ Duplication verticale STRICTE
+    niveauxCibles.forEach(niveau => {
+      if (niveau === niveauSource) return;
 
-    drawZonePlan();
+      ensureFullLevel(niveau);
+
+      SELECTED.forEach(empIdSource => {
+        const src = EMPLACEMENTS[empIdSource];
+        if (!src) return;
+
+        const empIdTarget =
+          `${src.allee}${String(src.travee).padStart(2, "0")}${niveau}${src.position}`;
+
+        const tgt = EMPLACEMENTS[empIdTarget];
+        if (tgt) tgt.famille = ACTIVE_FAMILLE;
+      });
+    });
+
+    SELECTED.clear();
+
+IMPLANTATION_ACTIVE = true;      // ✅ VALIDATION
+rebuildEmplCountByFam();        // ✅ SYNC MÉTIER
+computeAideImplantation();      // ✅ MAJ AIDE
+
+drawZonePlan();
   });
 
-  console.log("✅ Interaction plan bindée");
+  console.log("✅ Interaction plan bindée (ROW_INDEX only)");
 }
-
 console.log("✅ BLOC J chargé");
 
 /************************************************
@@ -1493,9 +1885,10 @@ function fillLevelSelect() {
     levelSel.appendChild(opt);
   });
 
-  if (FILTERS.niveau) {
-    levelSel.value = FILTERS.niveau;
-  }
+  levelSel.value =
+  document.getElementById("tab-reimplantation")?.classList.contains("active")
+    ? NIV_REIMPLANT
+    : NIV_ACTUEL;
 }
 
 /* =========================
@@ -1553,7 +1946,9 @@ function initFamillePalette() {
   palette.appendChild(noneBtn);
 
   // Boutons familles (STRUCTURANTES + AUT)
-const famillesActives = ["AUT", ...STRUCTURING_FAMILIES];
+const famillesActives = [
+  "AUT","TA","EL","AC","RO","HV","CO","EP","IN","SE"
+];
 
 famillesActives.forEach(code => {
 
@@ -1586,25 +1981,134 @@ function bindUIOnce() {
 
   // Changement de niveau
   levelSel?.addEventListener("change", () => {
-    FILTERS.niveau = levelSel.value;
-    SELECTED.clear();
-    ensureFullLevel(FILTERS.niveau);
-    rebuildEmpIndex();
-    drawZonePlan();
-    drawHeatmapAvant("plan2D");
+
+  const isReimplantation =
+    document
+      .getElementById("tab-reimplantation")
+      ?.classList.contains("active");
+
+  if (isReimplantation) {
+    // 🔵 onglet Réimplantation
+    NIV_REIMPLANT = levelSel.value;
+ensureFullLevel(NIV_REIMPLANT);
+rebuildEmpIndex();
+
+rebuildEmplCountByFam();   // ✅ recalcul cohérent
+computeAideImplantation(); // ✅ aide
+  } else {
+    // 🟢 onglet Situation actuelle (HEATMAP)
+    NIV_ACTUEL = levelSel.value;
+    resizeHeatmapCanvas();
+    drawHeatmapAvant();
+    drawZonePlan(); // plan actuel seulement
+  }
+});
+}
+/************************************************
+ * UI — Gestion des onglets
+ ************************************************/
+function rebuildLevelsAfterHeightChange() {
+
+  /* =====================================================
+     1️⃣ Créer tous les emplacements PHYSIQUES APRÈS Δ
+        🔑 AUCUNE SUPPRESSION
+  ===================================================== */
+
+  ALLEES.split("").forEach(allee => {
+    for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
+      const maxNiv = getHauteurReimplant(allee, tr);
+      if (!maxNiv) continue;
+
+      for (let n = "A"; n <= maxNiv; n = String.fromCharCode(n.charCodeAt(0) + 1)) {
+        ensureFullLevel(n); // ✅ ajoute uniquement ce qui manque
+      }
+    }
   });
 
-  // Filtre famille
-  famSel?.addEventListener("change", () => {
-    FILTERS.famille = famSel.value;
-    drawZonePlan();
-  });
+  /* =====================================================
+     2️⃣ Liste des niveaux désormais existants
+  ===================================================== */
+
+  const niveaux = getExistingLevels();
+
+  /* =====================================================
+     3️⃣ Niveau courant garanti valide
+  ===================================================== */
+
+  if (!niveaux.includes(NIV_REIMPLANT)) {
+    NIV_REIMPLANT = niveaux[0] || "";
+  }
+
+  /* =====================================================
+     4️⃣ Synchronisation UI (filtre niveau)
+  ===================================================== */
+
+  const levelSel = document.getElementById("levelSelect");
+  if (levelSel) {
+    levelSel.innerHTML = "";
+    niveaux.forEach(n => {
+      const opt = document.createElement("option");
+      opt.value = n;
+      opt.textContent = `Niveau ${n}`;
+      levelSel.appendChild(opt);
+    });
+    levelSel.value = NIV_REIMPLANT;
+  }
+
+  /* =====================================================
+     5️⃣ Rebuild graphique & indices (NON DESTRUCTIF)
+  ===================================================== */
+
+  rebuildEmpIndex();
+  resizeImplantationCanvas();
+  drawZonePlan();
+  computeAideImplantation();
+  updateReimpHeightInfo();
+
+  console.log("✅ Niveaux ajoutés — implantation conservée");
+}
+function openTab(tabId, btn) {
+  document.querySelectorAll(".tab-content")
+    .forEach(div => div.classList.remove("active"));
+  document.querySelectorAll(".tab")
+    .forEach(b => b.classList.remove("active"));
+
+  document.getElementById(tabId)?.classList.add("active");
+  btn?.classList.add("active");
+
+  const heat = document.getElementById("heatmap2D");
+  if (heat) {
+    heat.style.display =
+      tabId === "tab-actuel" ? "block" : "none";
+  }
+
+  /* =========================
+     ONGLET ACTUEL
+  ========================= */
+  if (tabId === "tab-actuel") {
+    NIV_ACTUEL ||= getExistingLevels()[0];
+    resizeHeatmapCanvas();
+    drawHeatmapAvant();
+  }
+
+  /* =========================
+     ONGLET RÉIMPLANTATION
+  ========================= */
+  if (tabId === "tab-reimplantation") {
+  NIV_REIMPLANT ||= getExistingLevels()[0];
+  ensureFullLevel(NIV_REIMPLANT);
+  rebuildEmpIndex();
+
+  initReimplantHeightUI(); // ✅ ICI EXACTEMENT
+}
+
+  resizeImplantationCanvas();
+  drawZonePlan();
 }
 
 /* =========================
    INIT UI GLOBAL
 ========================= */
-
 function initUI() {
   fillLevelSelect();
   fillFamilleFilter();
@@ -1617,6 +2121,84 @@ function initUI() {
 
 console.log("✅ BLOC K chargé");
 
+/* =====================================================
+   RÉIMPLANTATION — UI AJUSTEMENT DES NIVEAUX (NOUVELLE)
+===================================================== */
+
+function initReimplantHeightUI() {
+  const selA = document.getElementById("reimpAllee");
+  const selT = document.getElementById("reimpTravee");
+
+  if (!selA || !selT) return;
+
+  // Allées
+  selA.innerHTML = "";
+  ALLEES.split("").forEach(a => {
+    const opt = document.createElement("option");
+    opt.value = a;
+    opt.textContent = a;
+    selA.appendChild(opt);
+  });
+
+  // Travées
+  selT.innerHTML = "";
+  for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
+    const opt = document.createElement("option");
+    opt.value = tr;
+    opt.textContent = String(tr).padStart(2, "0");
+    selT.appendChild(opt);
+  }
+
+  selA.addEventListener("change", updateReimpHeightInfo);
+  selT.addEventListener("change", updateReimpHeightInfo);
+
+  updateReimpHeightInfo();
+}
+
+function updateReimpHeightInfo() {
+  const allee = reimpAllee.value;
+  const tr = reimpTravee.value;
+  const key = `${allee}_${String(tr).padStart(2, "0")}`;
+
+  const base = HAUTEUR_MAX[key];
+  const delta = DELTA_NIVEAUX_REIMPLANT[key] || 0;
+
+  document.getElementById("reimpBaseHeight").textContent = base || "—";
+  document.getElementById("reimpDelta").textContent =
+    delta >= 0 ? `+${delta}` : delta;
+
+  if (!base) {
+    document.getElementById("reimpFinalHeight").textContent = "—";
+    return;
+  }
+
+  const baseIdx = base.charCodeAt(0) - 65;
+  const finalIdx = Math.max(0, baseIdx + delta);
+
+  document.getElementById("reimpFinalHeight").textContent =
+    String.fromCharCode(65 + finalIdx);
+}
+
+function adjustReimpUI(delta) {
+
+  const allee = reimpAllee.value;
+  const travees = getSelectedReimpTravees();
+
+  if (!travees.length) {
+    alert("Sélectionne au moins une travée.");
+    return;
+  }
+
+  travees.forEach(tr => {
+    const key = `${allee}_${String(tr).padStart(2, "0")}`;
+    DELTA_NIVEAUX_REIMPLANT[key] =
+      (DELTA_NIVEAUX_REIMPLANT[key] || 0) + delta;
+  });
+
+  // 🔁 Recalcul global
+  rebuildLevelsAfterHeightChange();
+}
+
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC K2 — RESIZE CANVAS & AIDE À L’IMPLANTATION
@@ -1627,24 +2209,67 @@ console.log("✅ BLOC K chargé");
 ========================= */
 
 function resizeImplantationCanvas() {
-  const canvas = document.getElementById("plan2D-interactif");
+  const canvas = getActivePlanCanvas();
   if (!canvas) return;
 
-  const cols = ALLEES.length; // A → N
+  // ✅ DPR ROBUSTE
+  let dpr = window.devicePixelRatio || 1;
+  if (dpr < 1) dpr = 1; // 🔒 PROTECTION CRUCIALE
+
+  const cols = ALLEES.length;
   const rows = ROWS_TOTAL;
 
-  canvas.width  = VIEW.offsetX + cols * VIEW.cellW + 40;
-  canvas.height = VIEW.offsetY + rows * VIEW.cellH + 40;
+  const logicalWidth  = VIEW.offsetX + cols * VIEW.cellW + 40;
+  const logicalHeight = VIEW.offsetY + rows * VIEW.cellH + 40;
+
+  // ✅ résolution réelle canvas
+  canvas.width  = Math.round(logicalWidth * dpr);
+  canvas.height = Math.round(logicalHeight * dpr);
+
+  // ✅ taille CSS VISUELLE
+  canvas.style.width  = `${logicalWidth}px`;
+  canvas.style.height = `${logicalHeight}px`;
+
+  const ctx = canvas.getContext("2d");
+
+  // ✅ reset + scale SAFE
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
 
   console.log(
-    "✅ Canvas implantation dimensionné :",
-    canvas.width,
-    canvas.height
+    "✅ Canvas implantation corrigé SAFE:",
+    logicalWidth,
+    logicalHeight,
+    "dpr=",
+    dpr
   );
 }
 
-console.log("✅ BLOC K2 chargé");
+/************************************************
+ * RÉIMPLANTATION — AJUSTEMENT DES NIVEAUX (APRÈS)
+ ************************************************/
 
+function adjustReimplantLevels(delta) {
+  const allee = heightAllee.value;
+  const tr = heightTravee.value;
+  const key = `${allee}_${String(tr).padStart(2, "0")}`;
+
+  DELTA_NIVEAUX_REIMPLANT[key] =
+    (DELTA_NIVEAUX_REIMPLANT[key] || 0) + delta;
+
+  console.log(
+    "🔧 Δ niveaux réimplantation",
+    key,
+    DELTA_NIVEAUX_REIMPLANT[key]
+  );
+
+  rebuildEmpIndex();
+  resizeImplantationCanvas();
+  drawZonePlan();
+  computeAideImplantation();
+}
+
+console.log("✅ BLOC K2 chargé");
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC L — ORCHESTRATION FINALE
@@ -1679,129 +2304,82 @@ function analyzeHistoricalLoad() {
   const WINDOW_DAYS = 30;
   const WINDOW_MS = WINDOW_DAYS * 24 * 3600 * 1000;
 
+  // Liste des préparations avec date + familles présentes
   const prepList = Object.entries(PREPS)
     .map(([prepId, lignes]) => ({
       prepId,
       date: PREP_DATES[prepId],
-      lignes
+      familles: new Set(
+        lignes
+          .map(l =>
+            getFamilleImplantation(
+              ARTICLE_DATA[l.article]?.familleNorm
+            )
+          )
+          .filter(f => f && f !== "AUT")
+      )
     }))
     .filter(p => p.date instanceof Date && !isNaN(p.date))
     .sort((a, b) => a.date - b.date);
 
   if (prepList.length === 0) {
     console.warn("⚠️ Aucun historique exploitable");
+    HISTO_ANALYSIS = {};
     return;
   }
 
-  /* === capacité réelle par emplacement === */
-  const empPrepRefs = {};
-
-  prepList.forEach(p => {
-    p.lignes.forEach(l => {
-      empPrepRefs[l.empId] ??= {};
-      empPrepRefs[l.empId][p.prepId] ??= new Set();
-      empPrepRefs[l.empId][p.prepId].add(l.article);
-    });
-  });
-
-  const capByEmp = {};
-  Object.entries(empPrepRefs).forEach(([empId, prepMap]) => {
-    let maxSimul = 1;
-    Object.values(prepMap).forEach(set => {
-      if (set.size > maxSimul) maxSimul = set.size;
-    });
-    capByEmp[empId] = maxSimul;
-  });
-
-  /* === capacité moyenne réelle par famille === */
-  const capsTmp = {};
-
-  prepList.forEach(p => {
-    p.lignes.forEach(l => {
-      const famRaw = ARTICLE_DATA[l.article]?.famille || "AUT";
-      const fam = famRaw || "AUT";
-      capsTmp[fam] ??= [];
-      capsTmp[fam].push(capByEmp[l.empId] || 1);
-    });
-  });
-
-  const capByFam = {};
-  Object.entries(capsTmp).forEach(([fam, arr]) => {
-    capByFam[fam] =
-      arr.reduce((a, b) => a + b, 0) / Math.max(1, arr.length);
-  });
-
-  /* === fenêtre glissante === */
-  const maxEmplByFam = {};
+  // Collecte des échantillons de congestion par famille
   const samplesByFam = {};
   let left = 0;
-  const refCountByFam = {};
-
-  function addPrep(p) {
-    p.lignes.forEach(l => {
-      const fam = ARTICLE_DATA[l.article]?.famille || "AUT";
-      refCountByFam[fam] ??= new Map();
-      const m = refCountByFam[fam];
-      m.set(l.article, (m.get(l.article) || 0) + 1);
-    });
-  }
-
-  function removePrep(p) {
-    p.lignes.forEach(l => {
-      const fam = ARTICLE_DATA[l.article]?.famille || "AUT";
-      const m = refCountByFam[fam];
-      if (!m) return;
-      const v = m.get(l.article);
-      if (v === 1) m.delete(l.article);
-      else if (v > 1) m.set(l.article, v - 1);
-    });
-  }
 
   for (let right = 0; right < prepList.length; right++) {
-    addPrep(prepList[right]);
+    const refDate = prepList[right].date;
 
-    while (prepList[right].date - prepList[left].date > WINDOW_MS) {
-      removePrep(prepList[left]);
+    // Fenêtre glissante
+    while (refDate - prepList[left].date > WINDOW_MS) {
       left++;
     }
 
-    Object.entries(refCountByFam).forEach(([fam, map]) => {
-      const nbRefs = map.size;
+    // Préparations actives dans la fenêtre
+    const activePreps = prepList.slice(left, right + 1);
+
+    // Comptage de prépas simultanées par famille
+    const countByFam = {};
+
+    activePreps.forEach(p => {
+      p.familles.forEach(fam => {
+        countByFam[fam] = (countByFam[fam] || 0) + 1;
+      });
+    });
+
+    Object.entries(countByFam).forEach(([fam, n]) => {
       samplesByFam[fam] ??= [];
-      samplesByFam[fam].push(nbRefs);
-
-      const capMoy = capByFam[fam] || 1;
-      const empl = Math.ceil(nbRefs / capMoy);
-
-      if (!maxEmplByFam[fam] || empl > maxEmplByFam[fam]) {
-        maxEmplByFam[fam] = empl;
-      }
+      samplesByFam[fam].push(n);
     });
   }
 
-  /* === moyenne & P80 === */
-  const avgEmplByFam = {};
-  const p80EmplByFam = {};
+  // Calcul moyenne & P80 de congestion
+  const avgFluxByFam = {};
+  const p80FluxByFam = {};
 
   Object.entries(samplesByFam).forEach(([fam, arr]) => {
     if (!arr.length) return;
 
-    avgEmplByFam[fam] =
+    avgFluxByFam[fam] =
       arr.reduce((a, b) => a + b, 0) / arr.length;
 
     const sorted = [...arr].sort((a, b) => a - b);
     const idx = Math.floor(0.8 * (sorted.length - 1));
-    p80EmplByFam[fam] = sorted[idx];
+    p80FluxByFam[fam] = sorted[idx];
   });
 
+  // ✅ Résultat FINAL : congestion simultanée par famille
   HISTO_ANALYSIS = {
-    capByFam,
-    maxEmplByFam,
-    avgEmplByFam,
-    p80EmplByFam
+    avgFluxByFam,
+    p80FluxByFam
   };
 
-  console.log("✅ Analyse historique enrichie :", HISTO_ANALYSIS);
+  console.log("✅ Congestion par famille calculée", HISTO_ANALYSIS);
 }
 
 /************************************************
@@ -1833,56 +2411,35 @@ function nettoyerHistoriqueFamilles() {
  * DÉTAIL AUT — CALCUL DES GESTES PAR HISTORIQUE
  ************************************************/
 
-function computeAutGestDetailsFromDT() {
-
-  const aggAutGest = {}; // geste -> nombre de lignes DT
-
-  Object.values(PREPS).forEach(lignes => {
-    lignes.forEach(l => {
-      const famArticle = ARTICLE_DATA[l.article]?.famille || "AUT";
-
-      // ✅ SEULE CONDITION VALIDE
-      if (famArticle !== "AUT") return;
-
-      // ici le "geste" = famille / code gestion
-      const geste = famArticle; // ou autre champ si tu as un code geste distinct
-
-      aggAutGest[geste] = (aggAutGest[geste] || 0) + 1;
-    });
-  });
-
-  // ✅ stockage global si tu veux le réutiliser
-  AUT_GEST_DETAILS = aggAutGest;
-
-  console.log("✅ Détail des gestes pour articles AUT :", aggAutGest);
-}
-
 /************************************************
- * AUT — DÉTAIL "AUTRES"
- * Contenu réel du regroupement AUT
- * (DT only, sans implantation)
+ * AUT — DÉTAIL PAR GESTIONNAIRE (GEST BRUT)
+ * ✅ Décision AUT = famille normalisée
+ * ✅ Affichage   = GEST réel
  ************************************************/
 
-let AUT_GEST_DETAILS = {};
-
-function computeAutOthersDetailsFromDT() {
-  AUT_GEST_DETAILS = {};
+function computeAutGestDetails() {
+  const agg = {};
 
   Object.values(PREPS).forEach(lignes => {
     lignes.forEach(l => {
-      const fam = ARTICLE_DATA[l.article]?.famille;
-      if (!fam) return; // ✅ ignore les familles absentes
+      const rawFam = ARTICLE_DATA[l.article]?.familleBrute;
+      if (!rawFam) return;
 
-      // ✅ AUT = NON STRUCTURANT
-      if (STRUCTURING_FAMILIES.has(fam)) return;
+      // ✅ Décision AUT (LOGIQUE MÉTIER INCHANGÉE)
+      const famCanon = normalizeFamilleCode(rawFam);
+      if (getFamilleImplantation(famCanon) !== "AUT") return;
 
-      AUT_GEST_DETAILS[fam] =
-        (AUT_GEST_DETAILS[fam] || 0) + 1;
+      // ✅ GEST RÉEL (PAS NORMALISÉ)
+      const gest = rawFam.toString().trim().toUpperCase();
+
+      agg[gest] = (agg[gest] || 0) + 1;
     });
   });
 
-  console.log("✅ AUT (regroupement réel) :", AUT_GEST_DETAILS);
+  AUT_GEST_DETAILS = agg;
+  console.log("✅ AUT — Détail par GEST (BRUT) :", agg);
 }
+
 /************************************************
  * AUT — DÉTAIL (EXCEL BRUT)
  * AUCUN filtrage emplacement / article
@@ -1911,17 +2468,14 @@ function computeAutOthersDetailsFromExcel(rows, famCol) {
 
 /************************************************
  * RUN SIMULATION (BOUTON)
- * AVEC LOADER % PAR ÉTAPES MÉTIER
- ************************************************/
-
-/************************************************
- * RUN SIMULATION (BOUTON)
  * AVEC LOADER % FLUIDE
  ************************************************/
 
 async function runSimulation() {
   console.log("▶ runSimulation appelée");
   showLoader();
+await nextFrame();
+await nextFrame();
 
   try {
     /* =========================
@@ -1940,6 +2494,7 @@ async function runSimulation() {
     ACTIVE_FAMILLE = null;
     INITIAL_IMPLANTATION = {};
     STOCK_ROWS = [];
+    BESOIN_STOCK_CACHE = null; // ✅ OBLIGATOIRE
 
     /* =========================
        ÉTAPE 1 — VÉRIF DT
@@ -1963,6 +2518,24 @@ async function runSimulation() {
         Object.values(stockSheets)[0]
       );
     }
+ARTICLE_DATA_STOCK = {};
+
+STOCK_ROWS.forEach(row => {
+  const article = row["Article"];
+  if (!article) return;
+
+  const rawFam =
+  row["Famille"] ||
+  row["famille"] ||
+  row["GEST"] ||
+  row["Gest"] ||
+  row["Gest."]; // ✅ COLONNE RÉELLE DU STOCK
+
+  const fam = normalizeFamilleCode(rawFam);
+  if (!fam) return;
+
+  ARTICLE_DATA_STOCK[article] = { famille: fam };
+});
 
     /* =========================
        ÉTAPE 3 — LECTURE DT
@@ -1999,15 +2572,6 @@ async function runSimulation() {
     }
 
     /* =========================
-       ÉTAPE 5 — AUT (EXCEL BRUT)
-    ========================= */
-    setLoaderProgress(25, "Analyse des familles AUT…");
-    await nextFrame();
-
-    computeAutOthersDetailsFromExcel(rows, famCol);
-    updateAutDetails();
-
-    /* =========================
        ÉTAPE 6 — PARSING DT
        (% progressif dans la boucle)
     ========================= */
@@ -2030,8 +2594,10 @@ async function runSimulation() {
       NB_LIGNES++;
 
       const rawFam = famCol ? row[famCol] : "";
-      const fam = normalizeFamilleCode(rawFam);
-      ARTICLE_DATA[article] = { famille: fam };
+      ARTICLE_DATA[article] = {
+  familleBrute: rawFam,
+  familleNorm: normalizeFamilleCode(rawFam)
+};
 
       if (dateCol && row[dateCol] && !PREP_DATES[prepId]) {
         const d = parseExcelDate(row[dateCol]);
@@ -2044,16 +2610,111 @@ async function runSimulation() {
       }
     });
 
-    /* =========================
-       ÉTAPE 7 — EMPLACEMENTS
-    ========================= */
-    setLoaderProgress(45, "Initialisation des emplacements…");
-    await nextFrame();
 
-    initEmplacementsFromDT(rows, empCol);
-    FILTERS.niveau = getExistingLevels()[0] || "A";
-    ensureFullLevel(FILTERS.niveau);
-    rebuildEmpIndex();
+/* =========================
+   LOG — AUT : QUI PREND QUOI (DÉTAIL + TOTAL)
+   LOGIQUE STRICTE DE L’AIDE
+========================= */
+
+// empId -> Set(familles BRUTES présentes dans AUT)
+const empToAutBrutes = {};
+
+// 1️⃣ Regroupement par emplacement (familles BRUTES, AUT uniquement)
+STOCK_ROWS.forEach(row => {
+  const emp =
+    row["Emplacement"] ||
+    row["Emplacement stock"] ||
+    row["EMPLACEMENT"];
+
+  const article = row["Article"];
+  if (!emp || !article) return;
+
+  const famBrute = ARTICLE_DATA[article]?.famille;
+  if (!famBrute) return;
+
+  // on ne garde que les articles qui finissent dans AUT
+  if (getFamilleImplantation(famBrute) !== "AUT") return;
+
+  const empId = emp.toString().trim();
+  if (!empId) return;
+
+  empToAutBrutes[empId] ??= new Set();
+  empToAutBrutes[empId].add(famBrute);
+});
+
+// 2️⃣ Répartition par emplacement + cumul global
+const autTotals = {};
+
+Object.entries(empToAutBrutes).forEach(([empId, famSet]) => {
+  const fams = [...famSet];
+  const n = fams.length;
+  const part = 1 / n;
+
+  const detail = {};
+
+  fams.forEach(fam => {
+    detail[fam] = part;
+    autTotals[fam] = (autTotals[fam] || 0) + part;
+  });
+});
+
+// 3️⃣ TOTAL FINAL PAR FAMILLE BRUTE DANS AUT
+
+Object.entries(autTotals)
+  .sort((a, b) => b[1] - a[1])
+  .forEach(([fam, val]) => {
+    console.log(
+      fam,
+      "→",
+      val.toFixed(2),
+      "emplacements AUT"
+    );
+  });
+initEmplacementsFromStock();
+rebuildStockByEmpIndex();
+console.groupEnd();
+
+console.log("✅ SNAPSHOT ESPACE AVANT :", window.__SPACE_AVANT);
+
+/* =========================
+   ÉTAPE 6bis — AUT (DT UNIQUEMENT)
+========================= */
+
+setLoaderProgress(45, "Analyse AUT (DT) …");
+await nextFrame();
+
+// ✅ AUT = familles NON STRUCTURANTES du DT
+computeAutGestDetails();
+updateAutDetails();
+
+/* =========================
+   ÉTAPE 7 — EMPLACEMENTS (CORRIGÉE)
+========================= */
+setLoaderProgress(45, "Initialisation des emplacements…");
+await nextFrame();
+
+// 1️⃣ Emplacements issus des données (DT + STOCK)
+initEmplacementsFromDT(rows, empCol);
+initEmplacementsFromStock();
+rebuildStockByEmpIndex();
+
+// 2️⃣ 🔑 Construction de TOUS les emplacements physiques RÉELS
+//     → strictement selon HAUTEUR_MAX
+ensureAllPhysicalEmplacements();
+
+// 3️⃣ Niveaux de référence
+NIV_ACTUEL = getExistingLevels()[0] || "A";
+NIV_REIMPLANT = NIV_ACTUEL;
+
+// 4️⃣ ✅ SNAPSHOT ESPACE AVANT = ENTREPÔT RÉEL
+window.__SPACE_AVANT = computeSpaceSnapshot(
+  EMPLACEMENTS,   // ← base physique complète (HAUTEUR_MAX)
+  STOCK_BY_EMP
+);
+
+// 5️⃣ Préparation de la réimplantation (APRÈS)
+ensureFullLevel(NIV_REIMPLANT);
+rebuildEmpIndex();
 
     /* =========================
        ÉTAPE 8 — ANALYSE HISTORIQUE
@@ -2074,20 +2735,23 @@ async function runSimulation() {
     initUI();
     bindPlanInteractionOnce();
 
-    /* =========================
-       ÉTAPE 10 — VISUELS
-    ========================= */
-    setLoaderProgress(75, "Génération des heatmaps…");
-    await nextFrame();
+   /* =========================
+   ÉTAPE 10 — VISUELS (CORRIGÉ)
+========================= */
 
-    resizeHeatmapCanvas();
-    drawHeatmapAvant("plan2D");
+// 1️⃣ Plan TOUJOURS en premier
+setLoaderProgress(75, "Génération du plan…");
+await nextFrame();
 
-    setLoaderProgress(82, "Génération du plan…");
-    await nextFrame();
+resizeImplantationCanvas();
+drawZonePlan();   // ✅ BASE GRAPHIQUE
 
-    resizeImplantationCanvas();
-    drawZonePlan();
+// 2️⃣ Heatmap ENSUITE (overlay uniquement)
+setLoaderProgress(82, "Génération des heatmaps…");
+await nextFrame();
+
+resizeHeatmapCanvas();
+drawHeatmapAvant(); // ✅ SURIMPRESSION
 
     /* =========================
        ÉTAPE 11 — AIDE
@@ -2139,6 +2803,60 @@ async function runSimulation() {
 console.log("✅ BLOC L chargé");
 
 /************************************************
+ * BESOIN STOCK — CALCUL PAR FAMILLE
+ * ✅ Somme = nombre d’emplacements STOCK occupés
+ ************************************************/
+
+function computeStockNeedByFamille() {
+  if (BESOIN_STOCK_CACHE) return BESOIN_STOCK_CACHE;
+
+  const besoin = {}; // clé = FAMILLE D'IMPLANTATION
+
+  Object.values(EMPLACEMENTS_STOCK).forEach(e => {
+  if (!isZonePicking(e)) return;
+    const empId =
+      `${e.allee}${String(e.travee).padStart(2, "0")}${e.niveau}${e.position}`;
+
+    // articles STOCK présents à cet emplacement
+    const articles = STOCK_BY_EMP[empId] || [];
+
+    if (!articles.length) return;
+
+    // ✅ familles D'IMPLANTATION présentes sur l'emplacement
+    const famsImpl = new Set();
+
+    articles.forEach(r => {
+      const art = r["Article"];
+      const famBrute = ARTICLE_DATA_STOCK[art]?.famille;
+      if (!famBrute) return;
+
+      const famImpl = getFamilleImplantation(famBrute);
+      famsImpl.add(famImpl);
+    });
+
+    if (!famsImpl.size) return;
+
+    // ✅ partition stricte par emplacement
+    const part = 1 / famsImpl.size;
+
+    famsImpl.forEach(fam => {
+      besoin[fam] = (besoin[fam] || 0) + part;
+    });
+  });
+
+  BESOIN_STOCK_CACHE = besoin;
+  return besoin;
+}
+function rebuildEmplCountByFam() {
+  EMPL_COUNT_BY_FAM = {};
+  Object.values(EMPLACEMENTS).forEach(e => {
+  if (!isZonePicking(e)) return;
+  if (!e.famille) return;
+    EMPL_COUNT_BY_FAM[e.famille] =
+      (EMPL_COUNT_BY_FAM[e.famille] || 0) + 1;
+  });
+}
+/************************************************
  * AIDE À L’IMPLANTATION — VERSION FINALE
  * Lecture seule : aucune modification d’EMPLACEMENTS
  ************************************************/
@@ -2147,122 +2865,84 @@ function computeAideImplantation() {
   const container = document.getElementById("implantationHintsContent");
   if (!container) return;
 
-  /* =========================
-     SOURCES
-  ========================= */
+  // ✅ helper local (corrige l'erreur "r is not defined")
+  const r = v => Math.round(v || 0);
 
+  // ✅ besoin STOCK (emplacements)
+  const besoinStockByFam = computeStockNeedByFamille() || {};
+
+  // ✅ besoin FLUX (historique)
   const besoinFluxByFam =
-    HISTO_ANALYSIS?.p80EmplByFam ||
-    HISTO_ANALYSIS?.avgEmplByFam ||
-    {};
+  HISTO_ANALYSIS?.p80FluxByFam ||
+  HISTO_ANALYSIS?.avgFluxByFam ||
+  {};
 
-  if (!Object.keys(besoinFluxByFam).length) {
-    container.innerHTML = "Analyse historique non disponible.";
-    return;
-  }
-
-  const besoinStockByFam = computeStockNeedByFamille(STOCK_ROWS);
-  const capByFam = HISTO_ANALYSIS.capByFam || {};
+    const capByFam = computeCapaciteReelleByFamille();
 
   /* =========================
-     CAPACITÉ TOTALE
-  ========================= */
-
-  const capaciteTotale = Object.keys(EMPLACEMENTS).length;
-
-  /* =========================
-     AGRÉGATION PAR FAMILLE
+     AGRÉGATION PAR FAMILLE D’IMPLANTATION
   ========================= */
 
   const agg = {};
-
-  const familles = new Set([
-    ...Object.keys(besoinFluxByFam),
-    ...Object.keys(besoinStockByFam)
-  ]);
+  // ✅ Familles à considérer dans l'aide
+// ✅ Familles prises en compte dans l'aide à l'implantation
+const familles = new Set([
+  ...STRUCTURING_FAMILIES,              // ✅ TA, EL, RO, … EM, GN
+  ...Object.keys(besoinStockByFam),
+  ...Object.keys(besoinFluxByFam)
+]);
 
   familles.forEach(famBrute => {
     const fam = getFamilleImplantation(famBrute);
 
-    agg[fam] ??= {
-      fam,
-      besoinStock: 0,
-      besoinFlux: 0
-    };
-
-    agg[fam].besoinStock += besoinStockByFam[famBrute] || 0;
-    agg[fam].besoinFlux  += besoinFluxByFam[famBrute]  || 0;
-  });
-
-  /* =========================
-     BESOIN DE RÉFÉRENCE
-     (FLUX OU STOCK)
-  ========================= */
-
-  let sommeRef = 0;
-
-  Object.values(agg).forEach(o => {
-    o.besoinRef = Math.max(o.besoinStock, o.besoinFlux);
-    sommeRef += o.besoinRef;
-  });
-
-  /* =========================
-     CAPACITÉ RESTANTE
-  ========================= */
-
-  let capaciteRestante = capaciteTotale - sommeRef;
-  if (capaciteRestante < 0) capaciteRestante = 0;
-
-  /* =========================
-     POIDS DE RÉPARTITION
-     (MARGE)
-  ========================= */
-
-  let sommePoids = 0;
-
-  Object.values(agg).forEach(o => {
-    const marge = computeVariableMarge({
-      fam: o.fam,
-      besoinStock: o.besoinStock,
-      besoinFlux: o.besoinFlux
-    });
-
-    o.poids = o.besoinRef * marge;
-    sommePoids += o.poids;
-  });
-
-  /* =========================
-     BESOIN CIBLE FINAL
-  ========================= */
-
-  let cumulCible = 0;
-
-  Object.values(agg).forEach(o => {
-    const part =
-      sommePoids > 0
-        ? Math.round(capaciteRestante * o.poids / sommePoids)
-        : 0;
-
-    o.besoinCible = o.besoinRef + part;
-    cumulCible += o.besoinCible;
-  });
-
-  /* Ajustement final pour tomber EXACTEMENT sur la capacité */
-  let delta = capaciteTotale - cumulCible;
-  if (delta !== 0) {
-    const ordre = Object.values(agg)
-      .sort((a, b) => b.besoinRef - a.besoinRef);
-
-    let i = 0;
-    while (delta !== 0) {
-      ordre[i].besoinCible += delta > 0 ? 1 : -1;
-      delta += delta > 0 ? -1 : 1;
-      i = (i + 1) % ordre.length;
+    if (!agg[fam]) {
+      agg[fam] = {
+        fam,
+        besoinStockEmpl: 0,
+        besoinFluxRef: 0,
+        cap: 1,
+        besoinFluxEmpl: 0,
+        besoinCibleRaw: 0,
+        besoinCible: 0
+      };
     }
-  }
+
+    agg[fam].besoinStockEmpl += besoinStockByFam[famBrute] || 0;
+    agg[fam].besoinFluxRef  += besoinFluxByFam[famBrute]  || 0;
+  });
 
   /* =========================
-     CONSTRUCTION TABLEAU
+     CONVERSION FLUX → EMPLACEMENTS
+  ========================= */
+
+ Object.values(agg).forEach(o => {
+  const cap = capByFam[o.fam] || 1;
+
+  o.cap = cap;
+  o.besoinFluxEmpl = o.besoinFluxRef;
+
+  // Besoin brut (sans marge)
+  const besoinBrut = Math.max(
+    o.besoinStockEmpl,
+    o.besoinFluxEmpl
+  );
+
+  // ✅ marge métier VARIABLE (Option C)
+  const margeBrute = computeVariableMarge({
+    fam: o.fam,
+    besoinStock: o.besoinStockEmpl,
+    besoinFlux: o.besoinFluxEmpl
+  });
+
+  // ✅ marge COMPRESSÉE (50 %)
+  const margeEffective = margeBrute * 0.2;
+
+  o.besoinCibleRaw = besoinBrut * (1 + margeEffective);
+  o.besoinCible = Math.ceil(o.besoinCibleRaw);
+});
+
+  /* =========================
+     TABLE + TOTAUX
   ========================= */
 
   const rows = [];
@@ -2274,46 +2954,41 @@ function computeAideImplantation() {
     manque: 0
   };
 
-  const hasImplantationPosee = IMPLANTATION_ACTIVE;
-
   Object.values(agg).forEach(o => {
-    const cap = capByFam[o.fam] || 1;
+    let poses = 0;
+    let manque = 0;
+    let statut = "ℹ️ Aucun emplacement posé";
 
-    let emplPoses, manque, statut;
+    if (IMPLANTATION_ACTIVE) {
+      poses = EMPL_COUNT_BY_FAM?.[o.fam] || 0;
 
-if (!IMPLANTATION_ACTIVE) {
-  // ✅ PLAN VIERGE : RIEN N’EST POSÉ
-  emplPoses = 0;
-  manque = 0;
-  statut = "ℹ️ Aucun emplacement posé";
-} else {
-  // ✅ IMPLANTATION ACTIVE (manuelle ou auto)
-  emplPoses = Object.values(EMPLACEMENTS)
-    .filter(e => e.famille === o.fam)
-    .length;
-
-  manque = Math.max(0, o.besoinCible - emplPoses);
-  statut = manque === 0 ? "🟢 OK" : "🔴 Sous-dimensionné";
-}
+      manque = Math.max(0, o.besoinCible - poses);
+      statut = manque === 0 ? "🟢 OK" : "🔴 Sous-dimensionné";
+    }
 
     rows.push({
       fam: o.fam,
-      cap,
-      besoinStock: o.besoinStock,
-      besoinFlux: o.besoinFlux,
+      cap: o.cap,
+      besoinStock: o.besoinStockEmpl,
+      besoinFlux: o.besoinFluxEmpl,
       besoinCible: o.besoinCible,
-      poses: emplPoses,
+      poses,
       manque,
       statut
     });
 
-    total.besoinStock += o.besoinStock;
-    total.besoinFlux  += o.besoinFlux;
+    total.besoinStock += o.besoinStockEmpl;
+    total.besoinFlux  += o.besoinFluxEmpl;
     total.besoinCible += o.besoinCible;
-    total.poses       += emplPoses;
+    total.poses       += poses;
     total.manque      += manque;
   });
+// ✅ export pour l'auto-implantation
+window.__BESOIN_CIBLE_PAR_FAM = {};
 
+rows.forEach(r => {
+  window.__BESOIN_CIBLE_PAR_FAM[r.fam] = r.besoinCible;
+});
   /* =========================
      AFFICHAGE
   ========================= */
@@ -2333,44 +3008,30 @@ if (!IMPLANTATION_ACTIVE) {
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => `
+        ${rows.map(rw => `
           <tr>
-            <td><b>${r.fam}</b></td>
-            <td style="text-align:right">${r.cap.toFixed(2)}</td>
-            <td style="text-align:right">${r.besoinStock}</td>
-            <td style="text-align:right">${r.besoinFlux}</td>
-            <td style="text-align:right"><b>${r.besoinCible}</b></td>
-            <td style="text-align:right">${r.poses}</td>
-            <td style="text-align:right">${r.manque}</td>
-            <td style="text-align:center">${r.statut}</td>
+            <td><b>${rw.fam}</b></td>
+            <td style="text-align:right">${rw.cap.toFixed(2)}</td>
+            <td style="text-align:right">${r(rw.besoinStock)}</td>
+            <td style="text-align:right">${r(rw.besoinFlux)}</td>
+            <td style="text-align:right"><b>${r(rw.besoinCible)}</b></td>
+            <td style="text-align:right">${rw.poses}</td>
+            <td style="text-align:right">${rw.manque}</td>
+            <td style="text-align:center">${rw.statut}</td>
           </tr>
         `).join("")}
-
-        <tr style="border-top:2px solid #000; font-weight:bold; background:#f5f7fa;">
+        <tr style="border-top:2px solid #000; font-weight:bold;">
           <td>TOTAL</td>
           <td></td>
-          <td style="text-align:right">${total.besoinStock}</td>
-          <td style="text-align:right">${total.besoinFlux}</td>
-          <td style="text-align:right">${total.besoinCible}</td>
+          <td style="text-align:right">${r(total.besoinStock)}</td>
+          <td style="text-align:right">${r(total.besoinFlux)}</td>
+          <td style="text-align:right">${r(total.besoinCible)}</td>
           <td style="text-align:right">${total.poses}</td>
           <td style="text-align:right">${total.manque}</td>
-          <td style="text-align:center">
-            ${total.manque === 0 ? "🟢 OK" : "🔴 À ajuster"}
-          </td>
+          <td></td>
         </tr>
       </tbody>
     </table>
-
-    <div style="font-size:11px; margin-top:10px; color:#555;">
-      <b>Lecture du tableau</b><br>
-      • <b>Besoin stock</b> : emplacements minimum nécessaires pour contenir le stock réel (y compris stock dormant).<br>
-      • <b>Besoin flux</b> : emplacements nécessaires pour absorber l’activité normale.<br>
-      • <b>Besoin cible</b> : nombre d’emplacements à poser manuellement, tenant compte du stock, du flux et de la capacité réelle.<br><br>
-
-      <b>Principe</b><br>
-      Le stock et le flux sont prioritaires.  
-      La marge sert uniquement à répartir la capacité restante entre familles.
-    </div>
   `;
 }
 
@@ -2378,6 +3039,141 @@ if (!IMPLANTATION_ACTIVE) {
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC M — COMPARAISON & AFFECTATION RÉELLE
  ************************************************/
+function buildPhysicalColumns() {
+  const colonnes = {};
+
+  Object.values(EMPLACEMENTS).forEach(e => {
+    if (!isZonePicking(e)) return;
+
+    const key = `${e.allee}|${e.travee}|${e.position}`;
+    colonnes[key] ??= [];
+    colonnes[key].push(e);
+  });
+
+  // TRI vertical strict A → B → C
+  Object.values(colonnes).forEach(col =>
+    col.sort((a, b) => a.niveau.localeCompare(b.niveau))
+  );
+
+  return Object.values(colonnes);
+}
+
+function poserColonneDuBasVersLeHaut(colonne, famille) {
+  for (const e of colonne) {
+    if (e.famille != null) continue;
+    e.famille = famille;
+  }
+}
+function computeDistinctRefsByFamilleFromStock() {
+  const refsByFam = {};
+
+  Object.values(EMPLACEMENTS_STOCK).forEach(e => {
+    if (!isZonePicking(e)) return;
+
+    const empId =
+      `${e.allee}${String(e.travee).padStart(2, "0")}${e.niveau}${e.position}`;
+
+    const articles = STOCK_BY_EMP[empId] || [];
+
+    articles.forEach(row => {
+      const article = row["Article"];
+      if (!article) return;
+
+      const famBrute = ARTICLE_DATA_STOCK[article]?.famille;
+      if (!famBrute) return;
+
+      const fam = getFamilleImplantation(famBrute);
+      refsByFam[fam] ??= new Set();
+      refsByFam[fam].add(article);
+    });
+  });
+
+  // ✅ conversion finale Set → nombre
+  const out = {};
+  Object.entries(refsByFam).forEach(([fam, set]) => {
+    out[fam] = set.size;
+  });
+
+  return out;
+}
+
+function computeStockEmplacementsByFamille() {
+  const emplByFam = {};
+
+  Object.values(EMPLACEMENTS_STOCK).forEach(e => {
+    if (!isZonePicking(e)) return;
+
+    const empId =
+      e.allee +
+      String(e.travee).padStart(2, "0") +
+      e.niveau +
+      e.position;
+
+    const articles = STOCK_BY_EMP[empId] || [];
+    if (articles.length === 0) return;
+
+    const fams = {};
+
+    articles.forEach(row => {
+      const artData = ARTICLE_DATA_STOCK[row["Article"]];
+      if (!artData || !artData.famille) return;
+
+      const fam = getFamilleImplantation(artData.famille);
+      fams[fam] = true;
+    });
+
+    const famList = Object.keys(fams);
+    const part = 1 / famList.length;
+
+    famList.forEach(fam => {
+      emplByFam[fam] = (emplByFam[fam] || 0) + part;
+    });
+  });
+
+  return emplByFam;
+}
+function computeDistinctRefsByFamille() {
+  const refsByFam = {};
+
+  STOCK_ROWS.forEach(row => {
+    const article = row["Article"];
+    if (!article) return;
+
+    const famBrute = ARTICLE_DATA_STOCK[article]?.famille;
+    if (!famBrute) return;
+
+    const fam = getFamilleImplantation(famBrute);
+
+    refsByFam[fam] ??= new Set();
+    refsByFam[fam].add(article);
+  });
+
+  const out = {};
+  Object.entries(refsByFam).forEach(([fam, set]) => {
+    out[fam] = set.size;
+  });
+
+  return out;
+}
+function computeCapaciteReelleByFamille() {
+  const refsByFam = computeDistinctRefsByFamilleFromStock();
+  const emplByFam = computeStockEmplacementsByFamille();
+
+  const cap = {};
+
+  Object.keys(refsByFam).forEach(fam => {
+    const nbRefs = refsByFam[fam];
+    const nbEmpl = emplByFam[fam] || 0;
+
+    if (nbEmpl > 0) {
+      cap[fam] = nbRefs / nbEmpl;
+    } else {
+      cap[fam] = 1;
+    }
+  });
+
+  return cap;
+}
 
 /**
  * Usage réel par référence (fréquence DT)
@@ -2393,88 +3189,161 @@ function computeRefUsage() {
 
   return usage;
 }
+function buildZonesByFamille() {
+  const zones = {}; // fam -> [emp]
+
+  Object.entries(EMPLACEMENTS).forEach(([empId, e]) => {
+    if (!e.famille) return;
+
+    zones[e.famille] ??= [];
+    zones[e.famille].push({
+      empId,
+      famille: e.famille,   // ✅ AJOUT CRUCIAL
+      allee: e.allee,
+      travee: e.travee,
+      niveau: e.niveau,
+      position: e.position
+    });
+  });
+
+  return zones;
+}
+function groupRefsByFamille(refUsage) {
+  const refsByFam = {};
+
+  Object.keys(ARTICLE_DATA).forEach(ref => {
+    const famNorm = ARTICLE_DATA[ref]?.familleNorm;
+    const fam = getFamilleImplantation(famNorm); // ✅ ICI
+
+    refsByFam[fam] ??= [];
+    refsByFam[fam].push(ref);
+  });
+
+  Object.keys(refsByFam).forEach(fam => {
+    refsByFam[fam].sort(
+      (a, b) => (refUsage[b] || 0) - (refUsage[a] || 0)
+    );
+  });
+
+  return refsByFam;
+}
+function sortZoneByProximity(zone) {
+  return [...zone].sort(
+    (a, b) =>
+      Math.abs(a.travee - ENTRY_POINT.travee) -
+      Math.abs(b.travee - ENTRY_POINT.travee)
+  );
+}
 
 /**
  * Affectation réaliste des références APRÈS implantation
  */
 function assignReferencesToEmplacements() {
-  const refUsage = computeRefUsage();
-  const maxEmplByFam = HISTO_ANALYSIS.maxEmplByFam || {};
+  if (!IMPLANTATION_ACTIVE) {
+    return { feasible: false, reason: "Implantation absente" };
+  }
+
+  const refUsage   = computeRefUsage();
+  const zonesByFam = buildZonesByFamille();
+  const refsByFam  = groupRefsByFamille(refUsage);
 
   const refToEmp = {};
-  const empLoad = {};
-  const capacityIssues = [];
+  const errors = [];
 
-  Object.keys(EMPLACEMENTS).forEach(empId => {
-    empLoad[empId] = 0;
-  });
+  Object.keys(refsByFam).forEach(fam => {
+    const refs = refsByFam[fam];
 
-  const familles = new Set(
-  Object.values(ARTICLE_DATA)
-    .map(a => getFamilleImplantation(a.famille))
-);
-
-  for (const fam of familles) {
-    const maxEmpl = maxEmplByFam[fam] || 0;
-
-    const refs = Object.keys(ARTICLE_DATA)
-      .filter(r => getFamilleImplantation(ARTICLE_DATA[r].famille) === fam)
-      .sort((a, b) => (refUsage[b] || 0) - (refUsage[a] || 0));
-
-    const empsFam = Object.entries(EMPLACEMENTS)
-      .filter(([, e]) => e.famille === fam)
-      .map(([empId, e]) => ({ empId, ...e }));
-
-    if (empsFam.length < maxEmpl) {
-      capacityIssues.push({
-        family: fam,
-        required: maxEmpl,
-        available: empsFam.length
+    // 🔒 règle absolue : une famille structurante ne peut PAS aller en AUT
+    if (fam !== "AUT" && !zonesByFam[fam]) {
+      errors.push({
+        famille: fam,
+        refs: refs.slice(0, 10) // debug léger
       });
-      continue;
+      return;
     }
 
-    const zonesByKey = {};
-    empsFam.forEach(e => {
-      const band = Math.floor((e.travee - 1) / 2);
-      const key = `${e.allee}_${band}`;
-      zonesByKey[key] ??= [];
-      zonesByKey[key].push(e);
-    });
+    const zone = zonesByFam[fam];
+    if (!zone || zone.length === 0) return;
 
-    const zonesTriees = Object.values(zonesByKey);
+    const sortedZone = sortZoneByProximity(zone);
 
-    let zoneIdx = 0;
-    let posIdx = 0;
+    refs.forEach((ref, i) => {
+      const emp = sortedZone[i % sortedZone.length];
 
-    refs.forEach(ref => {
-      const zone = zonesTriees[Math.min(zoneIdx, zonesTriees.length - 1)];
-      const emp = zone[posIdx % zone.length];
+      // 🔥 Garde-fou ultime (sécurité)
+      if (fam !== "AUT" && emp.famille === "AUT") {
+        errors.push({
+          ref,
+          familleRef: fam,
+          empId: emp.empId,
+          familleEmp: emp.famille
+        });
+        return;
+      }
 
       refToEmp[ref] = emp.empId;
-      empLoad[emp.empId]++;
-      posIdx++;
-
-      if (posIdx >= zone.length) {
-        posIdx = 0;
-        zoneIdx++;
-      }
     });
+  });
+
+  // ❌ incohérence métier bloquante
+  if (errors.length > 0) {
+    console.error("❌ Implantation invalide — familles sous-dimensionnées :", errors);
+    return {
+      feasible: false,
+      reason: "Familles structurantes sans capacité suffisante",
+      errors
+    };
   }
 
-  if (capacityIssues.length > 0) {
-    return { feasible: false, issues: capacityIssues };
-  }
+  return {
+    feasible: true,
+    refToEmp
+  };
+}
+/* =========================
+   COMPTAGE DES EMPLACEMENTS
+========================= */
 
-  return { feasible: true, refToEmp, empLoad };
+const SURFACE_PAR_EMPLACEMENT = 0.96; // m² (80 x 120 cm)
+
+/**
+ * Compte les emplacements distincts utilisés AVANT
+ */
+function countUsedEmplacementsAvant() {
+  const set = new Set();
+
+  Object.values(PREPS).forEach(lignes => {
+    lignes.forEach(l => {
+      if (l.empId) set.add(l.empId);
+    });
+  });
+
+  return set.size;
 }
 
+/**
+ * Compte les emplacements distincts utilisés APRÈS
+ */
+function countUsedEmplacementsApres(refToEmp) {
+  const set = new Set();
+
+  Object.values(refToEmp).forEach(empId => {
+    if (empId) set.add(empId);
+  });
+
+  return set.size;
+}
 /**
  * Comparaison AVANT / APRÈS
  */
 function runComparison() {
   const out = document.getElementById("comparisonResults");
   if (!out) return;
+
+if (!IMPLANTATION_ACTIVE) {
+  alert("Implantation non définie — comparaison impossible.");
+  return;
+}
 
   const assign = assignReferencesToEmplacements();
   if (!assign || !assign.refToEmp) {
@@ -2514,15 +3383,163 @@ function runComparison() {
 
   const gain = tempsAvant - tempsApres;
   const pct = tempsAvant > 0 ? (gain / tempsAvant) * 100 : 0;
+/* =========================
+   PRODUCTIVITÉ
+========================= */
+
+const lignes = NB_LIGNES;
+
+const heuresAvant = tempsAvant / 3600;
+const heuresApres = tempsApres / 3600;
+
+const lignesParMinAvant =
+  lignes > 0 ? lignes / (tempsAvant / 60) : 0;
+
+const lignesParMinApres =
+  lignes > 0 ? lignes / (tempsApres / 60) : 0;
+
+const lignesParHeureAvant =
+  lignes > 0 ? lignes / heuresAvant : 0;
+
+const lignesParHeureApres =
+  lignes > 0 ? lignes / heuresApres : 0;
+
+/* =========================
+   ESPACE — COMPARAISON (CORRECTE)
+========================= */
+
+// ✅ AVANT : snapshot pris après import stock + DT
+const spaceAvant = window.__SPACE_AVANT;
+
+// ✅ APRÈS : structure ACTUELLE (niveaux modifiés ou non)
+const spaceApres = computeSpaceSnapshotApres(
+  EMPLACEMENTS,
+  STOCK_BY_EMP
+);
+
+const deltaEmpl = spaceApres.total - spaceAvant.total;
+const deltaSurface = spaceApres.surfaceTotal - spaceAvant.surfaceTotal;
 
   out.innerHTML = `
-    <h3>Comparaison AVANT / APRÈS</h3>
-    <p><b>Temps AVANT :</b> ${(tempsAvant / 3600).toFixed(2)} h</p>
-    <p><b>Temps APRÈS :</b> ${(tempsApres / 3600).toFixed(2)} h</p>
-    <p><b>Gain :</b> ${(gain / 3600).toFixed(2)} h (${pct.toFixed(1)} %)</p>
-  `;
-}
+<div class="dashboard">
 
+  <!-- ================= PRODUCTIVITÉ ================= -->
+  <section class="card card-main">
+    <div class="card-header">
+      ⏱ Productivité préparation
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi">
+        <div class="kpi-label">Lignes traitées</div>
+        <div class="kpi-value">${lignes}</div>
+      </div>
+
+      <div class="kpi">
+        <div class="kpi-label">Temps AVANT</div>
+        <div class="kpi-value">${heuresAvant.toFixed(1)} h</div>
+      </div>
+
+      <div class="kpi">
+        <div class="kpi-label">Temps APRÈS</div>
+        <div class="kpi-value">${heuresApres.toFixed(1)} h</div>
+      </div>
+    </div>
+<div class="prod-result ${pct >= 0 ? "good" : "bad"}">
+  ${pct >= 0 ? "Gain de temps" : "Perte de temps"}
+  <span>
+    ${pct >= 0 ? "+" : ""}
+    ${pct.toFixed(1)} %
+  </span>
+</div>
+    <div class="compare-big">
+      <div>
+        Lignes / min<br>
+        <span>${lignesParMinAvant.toFixed(2)}</span>
+        →
+        <span>${lignesParMinApres.toFixed(2)}</span>
+      </div>
+      <div>
+        Lignes / h<br>
+        <span>${lignesParHeureAvant.toFixed(1)}</span>
+        →
+        <span>${lignesParHeureApres.toFixed(1)}</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= EMPLACEMENTS ================= -->
+  <section class="card">
+    <div class="card-header">
+      📦 Emplacements
+    </div>
+
+    <div class="before-after">
+      <div>
+        <div class="tag before">AVANT</div>
+        <div class="big-number">${spaceAvant.total}</div>
+        <div class="sub">
+          ${spaceAvant.occupied} occupés<br>
+          ${spaceAvant.tauxUtilisation.toFixed(1)} %
+        </div>
+      </div>
+
+      <div>
+        <div class="tag after">APRÈS</div>
+        <div class="big-number">${spaceApres.total}</div>
+        <div class="sub">
+          ${spaceApres.occupied} occupés<br>
+          ${spaceApres.tauxUtilisation.toFixed(1)} %
+        </div>
+      </div>
+    </div>
+
+    <div class="result ${deltaEmpl >= 0 ? "good" : "bad"}">
+  ${deltaEmpl >= 0 ? "Gain" : "Perte"} :
+  ${Math.abs(deltaEmpl)} emplacements
+</div>
+
+  </section>
+
+  <!-- ================= SURFACE ================= -->
+  <section class="card">
+    <div class="card-header">
+      📐 Surface logistique
+    </div>
+
+    <div class="before-after">
+      <div>
+        <div class="tag before">AVANT</div>
+        <div class="big-number">
+          ${spaceAvant.surfaceTotal.toFixed(0)} m²
+        </div>
+        <div class="sub">
+          ${spaceAvant.surfaceOccupied.toFixed(0)} m² occupés<br>
+          ${spaceAvant.tauxUtilisation.toFixed(1)} %
+        </div>
+      </div>
+
+      <div>
+        <div class="tag after">APRÈS</div>
+        <div class="big-number">
+          ${spaceApres.surfaceTotal.toFixed(0)} m²
+        </div>
+        <div class="sub">
+          ${spaceApres.surfaceOccupied.toFixed(0)} m² occupés<br>
+          ${spaceApres.tauxUtilisation.toFixed(1)} %
+        </div>
+      </div>
+    </div>
+
+    <div class="result ${deltaSurface >= 0 ? "good" : "bad"}">
+  ${deltaSurface >= 0 ? "Gain" : "Perte"} :
+  ${Math.abs(deltaSurface).toFixed(0)} m²
+</div>
+  </section>
+
+</div>
+`;
+}
 /**
  * Vérifie la cohérence famille ↔ emplacement
  */
@@ -2530,8 +3547,10 @@ function checkMappingCoherence(refToEmp) {
   const errors = [];
 
   Object.entries(refToEmp).forEach(([ref, empId]) => {
-    const famRefBrute = ARTICLE_DATA[ref]?.famille;
-    const famRefImpl = getFamilleImplantation(famRefBrute);
+    const famRefBrute = ARTICLE_DATA[ref]?.familleBrute;
+const famRefImpl  = getFamilleImplantation(
+  ARTICLE_DATA[ref]?.familleNorm
+);
     const famEmp = EMPLACEMENTS[empId]?.famille;
 
     if (famRefImpl !== famEmp) {
@@ -2575,12 +3594,46 @@ function computeRotationByFamille() {
 /************************************************
  * - Uniquement par blocs complets
  ************************************************/
+function buildAutoImplantationContext() {
 
-function autoImplantationParBlocs_2Phases() {
+  /* ========= COLONNES PHYSIQUES ========= */
+  const colonnes = {};
+
+  Object.entries(EMPLACEMENTS).forEach(([empId, e]) => {
+    if (!isZonePicking(e)) return;
+
+    const key = `${e.allee}|${e.travee}|${e.position}`;
+    colonnes[key] ??= [];
+    colonnes[key].push(e);
+  });
+
+  // TRI vertical A → B → C
+  Object.values(colonnes).forEach(col =>
+    col.sort((a, b) => a.niveau.localeCompare(b.niveau))
+  );
+
+  /* ========= INDEX ALLEE / TRAVEE ========= */
+  const empIndex = {};
+
+  Object.entries(EMPLACEMENTS).forEach(([empId, e]) => {
+    if (!isZonePicking(e)) return;
+
+    empIndex[e.allee] ??= {};
+    empIndex[e.allee][e.travee] ??= [];
+    empIndex[e.allee][e.travee].push(empId);
+  });
+
+  return { colonnes, empIndex };
+}
+async function autoImplantationParBlocs_2Phases() {
 
   console.log("▶ autoImplantationParBlocs_2Phases appelée");
 
-  IMPLANTATION_ACTIVE = false;
+// ✅ Sécurité : synchroniser le niveau courant avant auto
+const niveaux = getExistingLevels();
+if (!niveaux.includes(NIV_REIMPLANT)) {
+  NIV_REIMPLANT = niveaux[0];
+}
 
   /* =====================================================
      PHASE 0 — RESET
@@ -2588,8 +3641,8 @@ function autoImplantationParBlocs_2Phases() {
   ===================================================== */
 
   Object.values(EMPLACEMENTS).forEach(e => {
-    if (e.travee > 2) e.famille = null;
-  });
+  if (isZonePicking(e)) e.famille = null;
+});
 
   const allees = ALLEES.split("");
 
@@ -2598,8 +3651,9 @@ function autoImplantationParBlocs_2Phases() {
   ===================================================== */
 
   const DEMI_ALLEES = [
-    { tStart: 10, tEnd: 16 },
-    { tStart: 3,  tEnd: 9  }
+  { tStart: 1,  tEnd: 2  },
+  { tStart: 3,  tEnd: 9  },
+  { tStart: 10, tEnd: 16 }
   ];
 
   const blocs = [];
@@ -2618,8 +3672,16 @@ function autoImplantationParBlocs_2Phases() {
      PHASE 2 — DONNÉES MÉTIER
   ===================================================== */
 
-  const p80 = HISTO_ANALYSIS.p80EmplByFam || {};
-  const rotation = computeRotationByFamille();
+  const p80 = HISTO_ANALYSIS.p80FluxByFam || {};
+  const rotationRaw = computeRotationByFamille();
+const rotation = {};
+
+Object.entries(rotationRaw).forEach(([famBrute, val]) => {
+  const fam = getFamilleImplantation(famBrute);
+  if (!fam || fam === "AUT") return;
+  rotation[fam] = (rotation[fam] || 0) + val;
+});
+
 
   // importance = P80 × rotation (AUT incluse)
   const importance = {};
@@ -2640,19 +3702,29 @@ function autoImplantationParBlocs_2Phases() {
      PHASE 3 — CIBLE PHYSIQUE MINIMUM (P80 STRICT)
   ===================================================== */
 
-  const cibleEmpl = {};
-  Object.keys(p80).forEach(fam => {
-    cibleEmpl[fam] = Math.round(p80[fam] || 0);
-  });
+  const cibleEmpl = window.__BESOIN_CIBLE_PAR_FAM || {};
+
+if (!Object.keys(cibleEmpl).length) {
+  alert("❌ Besoin cible indisponible. Lance l’aide à l’implantation d’abord.");
+  return;
+}
 
   /* =====================================================
-     PHASE 4 — CAPACITÉ D’UN BLOC
-  ===================================================== */
+   PHASE 4 — CAPACITÉ D’UN BLOC (CORRIGÉE)
+   ✅ basée sur la structure APRÈS (Δ niveaux inclus)
+===================================================== */
 
-  const capBloc =
-    Object.values(EMPLACEMENTS)
-      .filter(e => e.travee >= 10 && e.travee <= 16).length
-    / allees.length;
+const capBloc =
+  Object.values(EMPLACEMENTS)
+    .filter(e => isZonePicking(e))   // 🔑 CRUCIAL
+    .filter(e => e.travee >= 10 && e.travee <= 16)
+    .length
+  / allees.length;
+
+if (!capBloc || capBloc <= 0) {
+  alert("❌ Capacité de bloc nulle — structure invalide");
+  return;
+}
 
 /* =====================================================
    PHASE 5 — BLOCS MINIMUM (P80 GARANTI)
@@ -2712,39 +3784,213 @@ Object.keys(cibleEmpl).forEach(fam => {
     blocsAttribues[fam].push(bloc);
     idxFam++;
   });
-
-  /* =====================================================
-     PHASE 8 — POSE DES EMPLACEMENTS (BLOCS COMPLETS)
-  ===================================================== */
-
-  Object.entries(blocsAttribues).forEach(([fam, blocsFam]) => {
-    blocsFam.forEach(bloc => {
-      Object.values(EMPLACEMENTS)
-        .filter(e =>
-  e.famille === null &&
-  e.allee === bloc.allee &&
-  e.travee >= bloc.tStart &&
-  e.travee <= bloc.tEnd &&
-  emplacementExiste(e.allee, e.travee, e.position, e.niveau)
-)
-        .forEach(e => {
-  e.famille = STRUCTURING_FAMILIES.has(fam) ? fam : "AUT";
+// ✅ Compteur de pose par famille
+const posesParFam = {};
+Object.keys(blocsAttribues).forEach(fam => {
+  posesParFam[fam] = 0;
 });
 
-    });
+/* =====================================================
+   CONTEXTE AUTO-IMPLANTATION (DYNAMIQUE)
+   ✅ toujours cohérent avec Δ niveaux
+===================================================== */
+const {
+  colonnes,
+  empIndex
+} = buildAutoImplantationContext();
+
+/* =====================================================
+   PRÉPARATION BESOIN + SURPLUS (GLOBAL)
+===================================================== */
+
+// capacité totale réelle
+const capaciteTotale = Object.values(EMPLACEMENTS)
+  .filter(e => isZonePicking(e))
+  .length;
+
+// besoin total
+const totalBesoinCible = Object.values(cibleEmpl)
+  .reduce((a, b) => a + b, 0);
+
+// surplus global
+const surplusTotal = Math.max(0, capaciteTotale - totalBesoinCible);
+
+// quota de surplus par famille (AUT incluse)
+const surplusQuota = {};
+Object.keys(cibleEmpl).forEach(fam => {
+  surplusQuota[fam] =
+    totalBesoinCible > 0
+      ? surplusTotal * (cibleEmpl[fam] / totalBesoinCible)
+      : 0;
+});
+
+// suivi du surplus réellement posé
+const surplusPose = Object.fromEntries(
+  Object.keys(cibleEmpl).map(f => [f, 0])
+);
+
+/* =====================================================
+   FONCTION DE DÉCISION UNIQUE (BESOIN + SURPLUS)
+===================================================== */
+
+function choisirFamille(
+  cibleEmpl,
+  posesParFam,
+  surplusQuota,
+  surplusPose
+) {
+  const ALPHA = 0.75; // priorité besoin
+  const BETA  = 0.25; // priorité partage surplus
+
+  let bestFam = null;
+  let bestScore = -Infinity;
+
+  Object.keys(cibleEmpl).forEach(fam => {
+    const besoinRestant = Math.max(
+      0,
+      cibleEmpl[fam] - (posesParFam[fam] || 0)
+    );
+
+    const surplusRestant = Math.max(
+      0,
+      surplusQuota[fam] - (surplusPose[fam] || 0)
+    );
+
+    const besoinScore =
+      cibleEmpl[fam] > 0 ? besoinRestant / cibleEmpl[fam] : 0;
+
+    const surplusScore =
+      surplusQuota[fam] > 0 ? surplusRestant / surplusQuota[fam] : 0;
+
+    const score = ALPHA * besoinScore + BETA * surplusScore;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestFam = fam;
+    }
   });
 
-  /* =====================================================
-     FIN — RAFRAÎCHISSEMENT
-  ===================================================== */
+  return bestFam;
+}
 
-  IMPLANTATION_ACTIVE = true;
+/* =====================================================
+   PHASE 8 — POSE DES EMPLACEMENTS (CORRIGÉE)
+   ✅ 1 bloc = 1 famille (déjà décidée)
+   ✅ colonnes verticales complètes
+   ✅ PAS d’écrasement
+   ✅ comptage réel en niveaux
+===================================================== */
 
-  rebuildEmpIndex();
-  drawZonePlan();
-  computeAideImplantation();
+const posesCapaciteParFam = {};
+Object.keys(cibleEmpl).forEach(fam => {
+  posesCapaciteParFam[fam] = 0;
+});
 
-  alert("✅ Implantation par blocs terminée (P80 + % + AUT incluse)");
+let doneBlocs = 0;
+const totalBlocs = blocs.length;
+
+for (const bloc of blocs) {
+
+  const familleBloc = bloc.fam || "AUT";
+
+  /* =========================================
+     1️⃣ Collecte des colonnes PHYSIQUES du bloc
+  ========================================= */
+  const colonnesBloc = {};
+
+  for (let tr = bloc.tStart; tr <= bloc.tEnd; tr++) {
+    const ids = empIndex[bloc.allee]?.[tr];
+    if (!ids) continue;
+
+    ids.forEach(empId => {
+      const e = EMPLACEMENTS[empId];
+      if (!e) return;
+      if (!emplacementExiste(e.allee, e.travee, e.position, e.niveau)) return;
+
+      const key = `${e.allee}|${e.travee}|${e.position}`;
+      colonnesBloc[key] ??= [];
+      colonnesBloc[key].push(e);
+    });
+  }
+
+  /* =========================================
+     2️⃣ Sélection des colonnes posables
+        - vide OU déjà homogène
+        - tri vertical A → B → C
+  ========================================= */
+
+  const colonnesValides = [];
+
+  Object.values(colonnesBloc).forEach(colonne => {
+    colonne.sort((a, b) => a.niveau.localeCompare(b.niveau));
+
+    const famillesPresentes = new Set(
+      colonne.map(e => e.famille).filter(f => f !== null)
+    );
+
+    if (
+      famillesPresentes.size === 0 ||
+      (famillesPresentes.size === 1 &&
+        famillesPresentes.has(familleBloc))
+    ) {
+      colonnesValides.push(colonne);
+    }
+  });
+
+  if (!colonnesValides.length) {
+    doneBlocs++;
+    continue;
+  }
+
+  /* =========================================
+     3️⃣ Pose réelle du bas vers le haut
+        ✅ uniquement sur niveaux libres
+  ========================================= */
+
+  for (const colonne of colonnesValides) {
+    for (const e of colonne) {
+      if (e.famille !== null) continue;
+
+      e.famille = familleBloc;
+      posesCapaciteParFam[familleBloc]++;
+    }
+  }
+
+  /* =========================================
+     4️⃣ Progression
+  ========================================= */
+  doneBlocs++;
+  showAutoProgress(
+    `Implantation automatique (${doneBlocs}/${totalBlocs})`,
+    Math.round((doneBlocs / totalBlocs) * 100)
+  );
+
+  await new Promise(r => requestAnimationFrame(r));
+}
+
+/* =====================================================
+   GARANTIE ANTI-TROUS – FIN D'AUTO-IMPLANTATION
+===================================================== */
+
+Object.values(EMPLACEMENTS).forEach(e => {
+  if (!isZonePicking(e)) return;
+
+  if (e.famille === null) {
+    e.famille = "AUT";
+  }
+});
+
+/* =====================================================
+   FINALISATION
+===================================================== */
+
+IMPLANTATION_ACTIVE = true;
+rebuildEmpIndex();
+drawZonePlan();
+rebuildEmplCountByFam();
+computeAideImplantation();
+
+alert("✅ Implantation par blocs terminée");
 }
 
 /************************************************
@@ -2752,15 +3998,6 @@ Object.keys(cibleEmpl).forEach(fam => {
  * BLOC N — DUPLICATION FAMILLE (PROPRE)
  ************************************************/
 
-/**
- * Duplique les familles d’un niveau source vers un ou plusieurs niveaux cibles
- *
- * @param {string} sourceLevel  Niveau source (ex: "A")
- * @param {Array<string>} targetLevels  Niveaux cibles (ex: ["B","C"])
- * @param {"overwrite"|"fillEmpty"} mode
- *        - overwrite : écrase les familles existantes
- *        - fillEmpty : ne remplit que les cases vides
- */
 function duplicateLevelFamille(sourceLevel, targetLevels, mode = "overwrite") {
   targetLevels.forEach(target => {
     ensureFullLevel(target);
@@ -2787,6 +4024,7 @@ function duplicateLevelFamille(sourceLevel, targetLevels, mode = "overwrite") {
 
   rebuildEmpIndex();
   drawZonePlan();
+  rebuildEmplCountByFam();
   computeAideImplantation();
 }
 
@@ -2795,9 +4033,16 @@ function duplicateLevelFamille(sourceLevel, targetLevels, mode = "overwrite") {
 ========================= */
 
 document.getElementById("btnDuplicate")?.addEventListener("click", () => {
-  const source = FILTERS.niveau;
+
+  const isReimplantation =
+    document
+      .getElementById("tab-reimplantation")
+      ?.classList.contains("active");
+
+  const source = isReimplantation ? NIV_REIMPLANT : NIV_ACTUEL;
+
   if (!source) {
-    alert("Niveau source non défini.");
+    alert("Niveau source non défini (aucun niveau actif).");
     return;
   }
 
@@ -2807,17 +4052,22 @@ document.getElementById("btnDuplicate")?.addEventListener("click", () => {
   );
   if (!txt) return;
 
-  const targets = txt
-    .split(",")
-    .map(s => s.trim().toUpperCase())
-    .filter(
-      s => s && s !== source && NIVEAUX_AUTORISES.includes(s)
-    );
+  const niveauxExistants = getExistingLevels();
 
-  if (!targets.length) {
-    alert("Aucun niveau cible valide.");
-    return;
-  }
+const targets = txt
+  .split(",")
+  .map(s => s.trim().toUpperCase())
+  .filter(
+    s =>
+      s &&
+      s !== source &&
+      niveauxExistants.includes(s)
+  );
+
+if (!targets.length) {
+  alert("Aucun niveau cible valide (selon les hauteurs actuelles).");
+  return;
+}
 
   const mode = confirm(
     "OK = ÉCRASER les familles\nAnnuler = COMPLÉTER seulement les cases vides"

@@ -48,7 +48,6 @@
 
     <div class="time-and-height">
 
-      <!-- ✅ COLONNE GAUCHE : TEMPS -->
       <div class="time-params">
         <div class="grid">
           <label>X (inter‑allée)</label><input id="tX" value="2">
@@ -63,7 +62,6 @@
         </div>
       </div>
 
-      <!-- ✅ COLONNE DROITE : HAUTEUR MAX -->
       <div class="height-params">
         <h4>Hauteur max</h4>
 
@@ -84,7 +82,6 @@
 
     </div>
 
-    <!-- ✅ ACTIONS -->
     <button class="primary" onclick="runSimulation()">Calculer</button>
 
     <div id="results" class="results">
@@ -92,10 +89,14 @@
     </div>
   </section>
 
-  <!-- ================= HEATMAP ================= -->
+  <!-- ================= PLAN + HEATMAP ================= -->
   <section class="card">
     <h3>Plan 2D – Heatmap (situation actuelle)</h3>
-    <canvas id="plan2D"></canvas>
+
+    <div id="plan-container-actuel">
+      <canvas id="plan2D-actuel"></canvas>
+      <canvas id="heatmap2D"></canvas>
+    </div>
   </section>
 
 </div>
@@ -119,29 +120,27 @@
     Famille active : Aucune
   </div>
 
-  <!-- ✅ DÉTAIL AUT -->
   <div id="autDetailsPanel" class="card aut-panel">
     <details id="autDetails">
       <summary id="autSummary">AUT — Détail</summary>
-      <div id="autDetailsContent" class="side-content">—</div>
+      <div id="autDetailsContent">—</div>
     </details>
   </div>
 
   <div id="gestPalette" class="palette"></div>
 
-  <!-- ✅ AIDE À L’IMPLANTATION -->
   <div id="implantationHints" class="card">
     <h3>Aide à l’implantation</h3>
-
     <div id="implantationHintsContent">
       Lance une simulation pour afficher les recommandations.
     </div>
-</div>
+  </div>
 
   <div class="zone-toolbar-right">
     <button class="btn" id="btnApply">Appliquer au sélectionné</button>
     <button class="btn btn-secondary" id="btnClearSel">Vider sélection</button>
-    <button class="btn btn-primary" onclick="autoImplantationParBlocs_2Phases()">
+    <button class="btn btn-primary"
+            onclick="autoImplantationParBlocs_2Phases()">
       Implantation automatique — répartition par blocs
     </button>
     <button class="btn btn-secondary" id="btnDuplicate">
@@ -149,13 +148,48 @@
     </button>
   </div>
 
-  <section class="card">
-    <h3>Plan 2D – Réimplantation</h3>
-    <canvas id="plan2D-interactif"></canvas>
-  </section>
+  <!-- ================= AJUSTEMENT NIVEAUX — UI PRO ================= -->
+<section class="card reimplant-height-panel">
+  <h3>Ajustement des niveaux — Réimplantation</h3>
 
-</div>
+  <div class="height-control">
 
+    <label>
+      Allée
+      <select id="reimpAllee"></select>
+    </label>
+
+    <label>
+      Travée
+      <select id="reimpTravee" multiple size="8"></select>
+<small style="font-size:11px; color:#666;">
+  Ctrl / Cmd + clic pour sélectionner plusieurs travées
+</small>
+    </label>
+
+    <div class="height-info">
+      <div>Hauteur actuelle : <b id="reimpBaseHeight">—</b></div>
+      <div>Δ appliqué : <b id="reimpDelta">0</b></div>
+      <div>Hauteur finale : <b id="reimpFinalHeight">—</b></div>
+    </div>
+
+    <div class="height-actions">
+      <button class="btn btn-secondary" onclick="adjustReimpUI(-1)">➖</button>
+      <button class="btn" onclick="adjustReimpUI(1)">➕</button>
+    </div>
+
+  </div>
+</section>
+
+<!-- ================= PLAN 2D – RÉIMPLANTATION ================= -->
+<section class="card">
+  <h3>Plan 2D – Réimplantation</h3>
+  <div id="plan-container-reimplantation">
+    <canvas id="plan2D-reimplantation"></canvas>
+  </div>
+</section>
+
+</div> <!-- ✅✅✅ FIN DE tab-reimplantation (LIGNE QUI MANQUAIT) -->
 <!-- ================= ONGLET 3 : COMPARAISON ================= -->
 <div id="tab-comparaison" class="tab-content">
 
@@ -182,23 +216,7 @@
   </div>
 </div>
 
-
-<!-- ================= JS PRINCIPAL ================= -->
 <script src="app.js"></script>
-
-<!-- ================= GESTION DES ONGLETS ================= -->
-<script>
-function openTab(id, btn) {
-  document.querySelectorAll('.tab').forEach(b =>
-    b.classList.remove('active')
-  );
-  document.querySelectorAll('.tab-content').forEach(t =>
-    t.classList.remove('active')
-  );
-  btn.classList.add('active');
-  document.getElementById(id).classList.add('active');
-}
-</script>
 
 </body>
 </html>

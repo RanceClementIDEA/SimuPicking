@@ -35,7 +35,6 @@ body {
   border-bottom: 2px solid #fff;
 }
 
-/* Contenu des onglets */
 .tab-content {
   display: none;
 }
@@ -101,7 +100,7 @@ button.secondary,
 }
 
 /* =====================================================
-   RESULTS
+   RESULTS / INFOS
 ===================================================== */
 .results {
   margin-top: 12px;
@@ -109,36 +108,6 @@ button.secondary,
   padding: 12px;
   border-radius: 6px;
   font-weight: 700;
-}
-
-/* =====================================================
-   TOOLBARS / INFOS
-===================================================== */
-.zone-toolbar,
-.zone-toolbar-right,
-.zone-toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.zone-toolbar {
-  justify-content: space-between;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-  background: #fff;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-}
-
-.badge {
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: #f1f3f5;
-  border: 1px solid #e1e5ea;
-  font-weight: 700;
-  font-size: 12px;
 }
 
 .info-line {
@@ -157,30 +126,56 @@ button.secondary,
 }
 
 /* =====================================================
-   CANVAS
+   CANVAS — BASE
 ===================================================== */
-/* Le canvas ne scroll pas et garde sa taille réelle */
 canvas {
   display: block;
   background: #fff;
   border: 1px solid #ccc;
-  margin-bottom: 20px;
 }
 
 /* =====================================================
-   CONTAINERS DE PLAN
+   CONTAINERS DE PLANS (CRITIQUE)
 ===================================================== */
-/* Pas de scroll interne, le canvas peut s'agrandir */
-#implantationContainer,
-#heatmapContainer {
-  overflow: visible;
-  height: auto;
+
+/* Les conteneurs portent la taille */
+#plan-container-actuel,
+#plan-container-reimplantation {
+  position: relative;
+  display: inline-block;
+}
+
+/* Tous les canvas de plan */
+#plan2D-actuel,
+#plan2D-reimplantation,
+#heatmap2D {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  margin: 0;
 }
 
 /* =====================================================
-   LOADER GLOBAL (BLOCANT)
+   HIÉRARCHIE Z & INTERACTION
 ===================================================== */
 
+/* ✅ Plan interactif TOUJOURS cliquable */
+#plan2D-actuel,
+#plan2D-reimplantation {
+  z-index: 2;
+  pointer-events: auto;
+}
+
+/* ✅ Heatmap strictement VISUELLE */
+#heatmap2D {
+  z-index: 3;
+  pointer-events: none;
+}
+
+/* =====================================================
+   LOADER GLOBAL
+===================================================== */
 .loader-overlay {
   position: fixed;
   inset: 0;
@@ -210,7 +205,6 @@ canvas {
   margin-bottom: 14px;
 }
 
-/* Barre de chargement */
 .loader-bar {
   width: 100%;
   height: 10px;
@@ -226,77 +220,215 @@ canvas {
   transition: width 0.35s ease;
 }
 
-@keyframes loaderMove {
-  0%   { transform: translateX(-100%); }
-  50%  { transform: translateX(50%); }
-  100% { transform: translateX(200%); }
-}
+/* =========================
+   PARAMÈTRES TEMPS — FIX VISUEL
+========================= */
 
-/* === Layout paramètres temps + hauteur === */
 .time-and-height {
   display: grid;
-  grid-template-columns: 520px 220px; /* ✅ largeur contrôlée */
-  gap: 16px;                          /* ✅ espace réduit */
+  grid-template-columns: 520px auto;  /* ⬅️ temps | hauteur */
+  gap: 16px;
   align-items: start;
 }
 
-/* IMPORTANT : empêche la colonne temps de forcer 100% */
+/* Colonne TEMPS */
 .time-params {
-  min-width: 0;
+  max-width: 520px;
 }
 
-/* Bloc hauteur max */
+/* Empêche les inputs d'étirer la carte */
+.time-params .grid {
+  grid-template-columns: 180px 100px;
+}
+
+/* =========================
+   HAUTEUR MAX — ENCADRÉ COMME AVANT
+========================= */
+
 .height-params {
   background: #f7f9fc;
-  border: 1px solid #d0d7e2;
+  border: 1px solid #cfd8e3;
   border-radius: 6px;
   padding: 10px;
-  font-size: 12px;
+  max-width: 220px;
 }
 
 .height-params h4 {
   margin: 0 0 8px 0;
-  font-size: 13px;
-  font-weight: bold;
-  border-bottom: 1px solid #d0d7e2;
   padding-bottom: 4px;
+  font-size: 13px;
+  border-bottom: 1px solid #d0d7e2;
+}
+/* ✅ Quand le loader est visible, rien d'autre ne doit interférer */
+body.loading canvas {
+  visibility: hidden;
+  pointer-events: none;
 }
 
-.height-params label {
+.reimplant-height-panel {
+  max-width: 420px;
+}
+
+.height-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: end;
+}
+
+.height-control label {
+  font-size: 12px;
   display: flex;
   flex-direction: column;
-  margin-bottom: 6px;
+  gap: 4px;
 }
 
-.height-params select {
-  height: 24px;
+.height-info {
+  grid-column: span 2;
+  background: #f7f9fc;
+  border: 1px solid #d0d7e2;
+  border-radius: 6px;
+  padding: 8px;
   font-size: 12px;
 }
 
-.height-params button {
+.height-actions {
+  grid-column: span 2;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.dashboard {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-top: 20px;
+  font-family: Arial, sans-serif;
+}
+
+/* Carte générique */
+.card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+}
+
+/* Carte principale */
+.card-main {
+  grid-column: span 2;
+}
+
+.card-header {
+  font-size: 18px;
+  font-weight: bold;
+  margin-bottom: 20px;
+}
+
+/* KPI */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.kpi-label {
+  font-size: 13px;
+  color: #666;
+}
+
+.kpi-value {
+  font-size: 32px;
+  font-weight: bold;
+}
+
+/* Comparaison large */
+.compare-big {
+  display: flex;
+  justify-content: space-around;
+  font-size: 18px;
+}
+
+.compare-big span {
+  font-weight: bold;
+}
+
+/* Avant / Après */
+.before-after {
+  display: flex;
+  justify-content: space-between;
+  text-align: center;
+}
+
+.tag {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+
+.tag.before {
+  background: #e3f2fd;
+  color: #0d47a1;
+}
+
+.tag.after {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.big-number {
+  font-size: 30px;
+  font-weight: bold;
+}
+
+.sub {
+  font-size: 13px;
+  color: #555;
+}
+
+/* Résultat */
+.result {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #ddd;
+  font-size: 18px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.result.good {
+  color: #1b5e20;
+}
+
+.result.bad {
+  color: #b71c1c;
+}
+/* ===== RÉSULTAT PRODUCTIVITÉ ===== */
+
+.prod-result {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 2px solid #ddd;
+  text-align: center;
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.prod-result span {
+  display: block;
   margin-top: 6px;
-  height: 26px;
-  font-size: 12px;
-  background: #2f5597;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
+  font-size: 42px;
+  font-weight: 800;
 }
 
-.height-params button:hover {
-  background: #24447a;
+.prod-result.good {
+  color: #1b5e20; /* vert foncé */
 }
 
-/* === PARAMÈTRES TEMPS : INPUTS FIXES === */
-.time-params .grid {
-  grid-template-columns: 180px auto;
-}
-
-.time-params .grid input {
-  width: 90px;          /* largeur fixe */
-  max-width: 90px;
-  padding: 4px 6px;
-  font-size: 12px;
-  text-align: right;    /* chiffres alignés */
+.prod-result.bad {
+  color: #b71c1c; /* rouge foncé */
 }
