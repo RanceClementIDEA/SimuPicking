@@ -44,22 +44,47 @@
 
   <!-- ================= PARAMÈTRES TEMPS ================= -->
   <section class="card">
-    <h3>Paramètres temps unitaires</h3>
+    <h3>Paramètres temps </h3>
 
     <div class="time-and-height">
 
       <div class="time-params">
         <div class="grid">
-          <label>X (inter‑allée)</label><input id="tX" value="2">
-          <label>Z+ montée</label><input id="tZup" value="2.2">
-          <label>Z‑ descente</label><input id="tZdown" value="1.4">
-          <label>Rotation</label><input id="tRot" value="2">
-          <label>Positionnement</label><input id="tPos" value="6">
-          <label>Manipulation palette</label><input id="tPal" value="20">
-          <label>Prise UM</label><input id="tUM" value="10">
-          <label>Scan</label><input id="tScan" value="40">
-          <label>Marge (%)</label><input id="tMarge" value="15">
-        </div>
+
+  <!-- HORIZONTAL -->
+  <label for="tX">Temps X (par allée)</label>
+  <input id="tX" type="number" step="0.1" value="2">
+
+  <label for="tY">Temps Y (par travée)</label>
+  <input id="tY" type="number" step="0.1" value="1.3">
+
+  <!-- VERTICAL (TEMPS TOTAUX) -->
+  <label for="tZup">Temps Z montée TOTAL (Sol → niveau max)</label>
+  <input id="tZup" type="number" step="0.1" value="20">
+
+  <label for="tZdown">Temps Z descente TOTAL (Niveau max → sol)</label>
+  <input id="tZdown" type="number" step="0.1" value="13">
+
+  <!-- AUTRES TEMPS -->
+  <label for="tRot">Rotation</label>
+  <input id="tRot" type="number" value="2">
+
+  <label for="tPos">Positionnement</label>
+  <input id="tPos" type="number" value="6">
+
+  <label for="tPal">Manipulation palette</label>
+  <input id="tPal" type="number" value="20">
+
+  <label for="tUM">Prise UM</label>
+  <input id="tUM" type="number" value="10">
+
+  <label for="tScan">Scan</label>
+  <input id="tScan" type="number" value="40">
+
+  <label for="tMarge">Marge (%)</label>
+  <input id="tMarge" type="number" value="15">
+
+</div>
       </div>
 
       <div class="height-params">
@@ -137,16 +162,17 @@
   </div>
 
   <div class="zone-toolbar-right">
-    <button class="btn" id="btnApply">Appliquer au sélectionné</button>
-    <button class="btn btn-secondary" id="btnClearSel">Vider sélection</button>
-    <button class="btn btn-primary"
-            onclick="autoImplantationParBlocs_2Phases()">
-      Implantation automatique — répartition par blocs
-    </button>
-    <button class="btn btn-secondary" id="btnDuplicate">
-      Dupliquer la famille vers d’autres niveaux
-    </button>
-  </div>
+  <button class="btn" id="btnApply">Appliquer au sélectionné</button>
+  <button class="btn btn-secondary" id="btnClearSel">Vider sélection</button>
+
+  <button class="btn btn-primary" id="btnAutoImplantImportance">
+  Implantation automatique — répartition par blocs
+</button>
+
+  <button class="btn btn-secondary" id="btnDuplicate">
+    Dupliquer la famille vers d’autres niveaux
+  </button>
+</div>
 
   <!-- ================= AJUSTEMENT NIVEAUX — UI PRO ================= -->
 <section class="card reimplant-height-panel">
@@ -172,10 +198,52 @@
       <div>Δ appliqué : <b id="reimpDelta">0</b></div>
       <div>Hauteur finale : <b id="reimpFinalHeight">—</b></div>
     </div>
+<div class="height-composition" id="reimpComposition">
 
+  <div id="reimpSolLine" style="display:none;">
+    🧱 Étagères ajoutées :
+    <b id="reimpSolCount">0</b>
+  </div>
+
+  <div id="reimpLisseLine" style="display:none;">
+    🏗 Lisses ajoutées :
+    <b id="reimpLisseCount">0</b>
+  </div>
+
+  <div id="reimpImpactLine" style="margin-top:4px; font-size:12px;">
+    ↳ Impact vertical global :
+    <b id="reimpImpact">neutre</b>
+  </div>
+
+</div>
     <div class="height-actions">
-      <button class="btn btn-secondary" onclick="adjustReimpUI(-1)">➖</button>
-      <button class="btn" onclick="adjustReimpUI(1)">➕</button>
+      <button
+  class="btn btn-secondary"
+  onclick="setAjoutMode('ETAGERE'); adjustReimpUI(-1);"
+>
+➖ Étagère
+</button>
+
+<button
+  class="btn"
+  onclick="setAjoutMode('ETAGERE'); adjustReimpUI(1);"
+>
+➕ Étagère
+</button>
+
+<button
+  class="btn btn-secondary"
+  onclick="setAjoutMode('LISSE'); adjustReimpUI(-1);"
+>
+➖ Lisse
+</button>
+
+<button
+  class="btn"
+  onclick="setAjoutMode('LISSE'); adjustReimpUI(1);"
+>
+➕ Lisse
+</button>
     </div>
 
   </div>
@@ -196,7 +264,49 @@
   <section class="card highlight">
     <h3>Comparaison AVANT / APRÈS</h3>
     <button class="primary" onclick="runComparison()">Comparer</button>
+<!-- ================= KPI COMPARAISON ================= -->
+<section class="card kpi-dashboard">
 
+  <!-- ===== Résumé exécutif ===== -->
+  <div class="kpi-header">
+    <h3>Résumé exécutif</h3>
+    <p class="kpi-subtitle">
+      Lecture directe des gains opérationnels et financiers
+    </p>
+  </div>
+<div class="kpi-period">
+  Période analysée :
+  <b id="kpiDateStart">—</b> → <b id="kpiDateEnd">—</b>
+  (<span id="kpiNbDays">—</span> jours)
+</div>
+  <div class="kpi-grid-4">
+    <div class="kpi-box">
+      <div class="kpi-label">Heures gagnées / jour</div>
+      <div class="kpi-value" id="kpiHoursDay">—</div>
+    </div>
+
+    <div class="kpi-box highlight">
+      <div class="kpi-label">ETP gagné</div>
+      <div class="kpi-value" id="kpiETP">—</div>
+    </div>
+
+    <div class="kpi-box">
+      <div class="kpi-label">Économie / jour (€)</div>
+      <div class="kpi-value" id="kpiEcoDay">—</div>
+    </div>
+
+    <div class="kpi-box highlight">
+      <div class="kpi-label">Économie / an (€)</div>
+      <div class="kpi-value" id="kpiEcoYear">—</div>
+    </div>
+  </div>
+
+  <!-- ===== Message de synthèse ===== -->
+  <div class="kpi-summary-text" id="kpiSummaryText">
+    —
+  </div>
+
+</section>
     <div id="comparisonResults">
       Aucune comparaison effectuée.
     </div>
