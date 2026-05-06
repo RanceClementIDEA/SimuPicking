@@ -9,7 +9,8 @@ console.log("✅ app.js chargé");
 /* =========================
    ÉTAT GLOBAL
 ========================= */
-
+// Niveaux possibles (ordre alphabétique)
+const NIVEAUX_AUTORISES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 let PREPS = {};
 let NB_LIGNES = 0;
 let ARTICLE_DATA = {};
@@ -26,7 +27,18 @@ let HISTO_ANALYSIS = {
   worstSnapshot: {},
   capByFam: {}
 };
+let DELTA_NIVEAUX_REIMPLANT = {}; // clé = "A_01" → { ETAGERE, LISSE }
+let MODE_AJOUT_NIVEAU = "LISSE"; // ou "ETAGERE
+let NIVEAU_TYPE = {};
+let IMPLANTATION_ACTIVE = false;
 
+// 🔑 Initialisation canonique
+NIVEAUX_AUTORISES.split("").forEach(n => {
+  NIVEAU_TYPE[n] = "GERBEUR";
+});
+NIVEAU_TYPE.A = "SOL";
+
+let VALIDATION_VERTICAL_CACHE = {};
 let BESOIN_STOCK_CACHE = null;
 let FILTERS = {
   famille: ""
@@ -35,12 +47,12 @@ let FILTERS = {
 // ✅ niveaux découplés par contexte
 let NIV_ACTUEL = "";        // plan actuel + heatmap
 let NIV_REIMPLANT = "";     // plan de réimplantation
-// ✅ Variation de niveaux pour la réimplantation APRÈS
-// clé = "A_01", valeur = entier (-2, -1, +1, +2, …)
-let DELTA_NIVEAUX_REIMPLANT = {};
+
 
 let ACTIVE_FAMILLE = null;
+let AUTO_IMPLANT_RUNNING = false;
 let SELECTED = new Set();
+let INTERNAL_LEVEL_UPDATE = false;
 
 /* =========================
    RÈGLES MÉTIER
@@ -48,10 +60,12 @@ let SELECTED = new Set();
 
 // === TEMPS FIXES MÉTIER ===
 const TEMPS_SEQUENCEUR = 18; // s : séquenceur <-> entrée NEF2
-
+const SHOW_VERTICAL_VALIDATION = false;
+const DEBUG_TIMES = true;
 
 // ✅ seuil utilisé ailleurs → on le garde
 const SEUIL_MIN_P80 = 2;
+const SURFACE_PAR_EMPLACEMENT = 0.96; // m² (80 x 120 cm)
 
 // Familles STRUCTURANTES : interdites en AUTRES
 const STRUCTURING_FAMILIES = new Set([
@@ -136,7 +150,6 @@ function getActivePlanCanvas() {
   return document.getElementById("plan2D-actuel");
 }
 let EMP_INDEX = new Map();
-let IMPLANTATION_ACTIVE = false;
 
 /* =========================
    CONFIGURATION PHYSIQUE ENTREPÔT
@@ -158,8 +171,6 @@ const TRAVEE_POSITIONS = {
   9: [1, 2, 3] // Travée 9 : pas de position 4
 };
 
-// Niveaux possibles (ordre alphabétique)
-const NIVEAUX_AUTORISES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 /*
  Hauteur maximale réelle par allée / travée
@@ -240,12 +251,7 @@ function isPositionValide(travee, position) {
 function isNiveauValide(allee, travee, niveau) {
   const key = `${allee}_${String(travee).padStart(2, "0")}`;
 
-  const isReimplantation =
-    document
-      .getElementById("tab-reimplantation")
-      ?.classList.contains("active");
-
-  const maxNiveau = isReimplantation
+  const maxNiveau = IMPLANTATION_ACTIVE
     ? getHauteurReimplant(allee, travee)   // ✅ APRÈS
     : HAUTEUR_MAX[key];                    // ✅ AVANT
 
@@ -253,12 +259,31 @@ function isNiveauValide(allee, travee, niveau) {
 
   return niveau.charCodeAt(0) <= maxNiveau.charCodeAt(0);
 }
+function isZonePicking(e) {
+  if (!e) return false;
+
+  // 1️⃣ zone physiquement existante (APRÈS inclus)
+  if (!isNiveauValide(
+        e.allee,
+        e.travee,
+        e.niveau
+      )) return false;
+
+  if (!isPositionValide(e.travee, e.position)) return false;
+
+  // 2️⃣ exclusions métier
+  if (isZoneInterdite(e)) return false;
+
+  return true;
+}
 function isNiveauValideApres(allee, travee, niveau) {
   const maxNiveau = getHauteurReimplant(allee, travee);
   if (!maxNiveau) return false;
   return niveau.charCodeAt(0) <= maxNiveau.charCodeAt(0);
 }
+
 function emplacementExiste(allee, travee, position, niveau) {
+
   return (
     ALLEES.includes(allee) &&
     travee >= TRAVEE_MIN &&
@@ -269,42 +294,41 @@ function emplacementExiste(allee, travee, position, niveau) {
 }
 function getHauteurReimplant(allee, travee) {
   const key = `${allee}_${String(travee).padStart(2, "0")}`;
-
   const base = HAUTEUR_MAX[key];
   if (!base) return null;
 
-  const delta = DELTA_NIVEAUX_REIMPLANT[key] || 0;
+  const d = DELTA_NIVEAUX_REIMPLANT[key] || { ETAGERE: 0, LISSE: 0 };
+  const totalDelta = d.ETAGERE + d.LISSE;
 
   const baseIdx = base.charCodeAt(0) - 65;
-  const finalIdx = Math.max(0, baseIdx + delta);
-
-  return String.fromCharCode(65 + finalIdx);
+  return String.fromCharCode(65 + baseIdx + totalDelta);
 }
-function getSelectedReimpTravees() {
-  const sel = document.getElementById("reimpTravee");
-  if (!sel) return [];
 
-  return [...sel.selectedOptions]
-    .map(o => Number(o.value))
-    .filter(v => !isNaN(v));
-}
 /* =====================================================
    ZONE PICKING — DÉFINITION CANONIQUE
    ✅ travées 1 et 2 COMPTÉES
    ✅ compatible aide / plan / auto-implantation
 ===================================================== */
 
-function isZonePicking(e) {
+function isZonePhysique(e) {
+  return emplacementExiste(e.allee, e.travee, e.position, e.niveau);
+}
+
+function isZoneInterdite(e) {
   if (!e) return false;
 
-  // ✅ on compte TOUTES les travées physiques
-  return emplacementExiste(
-    e.allee,
-    e.travee,
-    e.position,
-    e.niveau
-  );
+  // ❌ Zones grisées non sélectionnables
+  if (
+    (e.allee === "M" || e.allee === "N") &&
+    e.travee >= 14 &&
+    e.travee <= 16
+  ) {
+    return true;
+  }
+
+  return false;
 }
+
 function isZoneVisuellementGrisee(e) {
   if (!e) return true;
 
@@ -532,18 +556,20 @@ function labelFamillePosition(famille) {
   return famille || "";
 }
 
-function getFamilleImplantation(familleBrute) {
-  if (!familleBrute) return "AUT";
+function getFamilleImplantation(famille) {
+  if (!famille) return "AUT";
 
-  // Normalisation obligatoire
-  const fam = normalizeFamilleCode(familleBrute);
+  // ✅ SI déjà canonique, on retourne DIRECT
+  if (STRUCTURING_FAMILIES.has(famille)) {
+    return famille;
+  }
 
-  // Familles réellement structurantes (nouvelle règle)
+  const fam = normalizeFamilleCode(famille);
+
   if (STRUCTURING_FAMILIES.has(fam)) {
     return fam;
   }
 
-  // Tout le reste (CL, CS, PE, OU, etc.)
   return "AUT";
 }
 
@@ -810,8 +836,12 @@ function ensureAllPhysicalEmplacements() {
   ALLEES.split("").forEach(allee => {
     for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
       const key = `${allee}_${String(tr).padStart(2, "0")}`;
-      const max = HAUTEUR_MAX[key];
-      if (!max) continue;
+
+const max = IMPLANTATION_ACTIVE
+  ? getHauteurReimplant(allee, tr)
+  : HAUTEUR_MAX[key];
+
+if (!max) continue;
 
       for (
         let n = "A";
@@ -908,21 +938,31 @@ heightAllee.addEventListener("change", updateHeightEditorValue);
 heightTravee.addEventListener("change", updateHeightEditorValue);
 
 document.getElementById("applyHeight")?.addEventListener("click", () => {
+
+  // 🔒 INTERDICTION FORMELLE EN MODE RÉIMPLANTATION
+  if (IMPLANTATION_ACTIVE) {
+    alert(
+      "❌ La hauteur physique AVANT ne peut pas être modifiée en mode réimplantation.\n" +
+      "Utilise l’ajout de niveaux (étagère / lisse) uniquement."
+    );
+    return;
+  }
+
   const allee = heightAllee.value;
   const tr = heightTravee.value;
   const niveau = heightNiveau.value;
 
   const key = `${allee}_${String(tr).padStart(2, "0")}`;
-  HAUTEUR_MAX[key] = niveau;
+  HAUTEUR_MAX[key] = niveau; // ✅ autorisé UNIQUEMENT hors réimplantation
 
-  console.log("✅ Hauteur max modifiée :", key, niveau);
+  console.log("✅ Hauteur physique AVANT modifiée :", key, niveau);
 
   rebuildEmpIndex();
   drawZonePlan();
   resizeImplantationCanvas();
-  
   drawHeatmapAvant();
 });
+
 /* =========================
    ESPACE — BASE PHYSIQUE
 ========================= */
@@ -946,6 +986,8 @@ function countStockOccupiedEmplacements() {
 ========================= */
 
 function computeSpaceSnapshot(emplacements, stockByEmp) {
+
+  // ✅ DÉFINITION MANQUANTE
   const phys = Object.values(emplacements)
     .filter(e => isZonePicking(e));
 
@@ -969,13 +1011,13 @@ function computeSpaceSnapshot(emplacements, stockByEmp) {
     tauxUtilisation: total ? (occupied / total) * 100 : 0
   };
 }
+
 // ✅ SNAPSHOT ESPACE — APRÈS (INDÉPENDANT UI)
 function computeSpaceSnapshotApres(emplacements, stockByEmp) {
   const phys = Object.values(emplacements)
     .filter(e =>
-      ALLEES.includes(e.allee) &&
-      isPositionValide(e.travee, e.position) &&
-      isNiveauValideApres(e.allee, e.travee, e.niveau) // 🔑 clé
+      isZonePicking(e) &&                // ✅ même règle AVANT / APRÈS
+      isNiveauValideApres(e.allee, e.travee, e.niveau)
     );
 
   const total = phys.length;
@@ -998,6 +1040,7 @@ function computeSpaceSnapshotApres(emplacements, stockByEmp) {
     tauxUtilisation: total ? (occupied / total) * 100 : 0
   };
 }
+
 function computeSpaceMetrics() {
   const total = countPhysicalEmplacements();
   const occupied = countStockOccupiedEmplacements();
@@ -1128,9 +1171,14 @@ function getEmpIdFromMouse(canvas, ev) {
   if (!cell) return null;
 
   const key = `${NIV_REIMPLANT}|${cell.alleeIndex}|${cell.row}`;
-  return EMP_INDEX.get(key) || null;
-}
+  const empId = EMP_INDEX.get(key);
+  if (!empId) return null;
 
+  const e = EMPLACEMENTS[empId];
+  if (isZoneInterdite(e)) return null; // 🚫 BLOQUÉ
+
+  return empId;
+}
 console.log("✅ BLOC F chargé");
 
 /************************************************
@@ -1168,10 +1216,47 @@ const ENTRY_POINT = {
   allee: "A",
   travee: 9.5 // entre travées 9 et 10
 };
+// ✅ Coût structurel par allée (A → N)
+// représente la profondeur réelle depuis l’entrée
+const COST_PAR_ALLEE = 0.8; // secondes par allée (à ajuster finement)
+// ✅ Allées de circulation transversales
+const CIRCULATION_TRAVEES = [2.5, 9.5];
+
+// ✅ Index numérique d’allée
+function alleeIndex(e) {
+  return ALLEES.indexOf(e.allee);
+}
+// ✅ Pénalité structurelle d’éloignement depuis l’allée A
+function costEloignementAllee(e) {
+  const idxA = alleeIndex(ENTRY_POINT); // toujours 0 (allée A)
+  const idxE = alleeIndex(e);
+  return Math.abs(idxE - idxA) * COST_PAR_ALLEE;
+}
+// ✅ Choix de l’allée de circulation la plus proche
+function nearestCirculation(travee) {
+  return CIRCULATION_TRAVEES.reduce((best, t) =>
+    Math.abs(t - travee) < Math.abs(best - travee) ? t : best
+  );
+}
 
 // === DISTANCE HORIZONTALE ===
-function distanceTravee(a, b, T) {
-  return Math.abs(a.travee - b.travee) * T.X;
+// ✅ Distance horizontale réaliste (X + Y via circulation)
+// ✅ Distance horizontale réaliste SANS sur-penalisation
+function distanceHorizontale(a, b, T) {
+
+  // ✅ CAS 1 — Même allée → déplacement direct (PAS de circulation)
+  if (a.allee === b.allee) {
+    return Math.abs(a.travee - b.travee) * T.X;
+  }
+
+  // ✅ CAS 2 — Changement d’allée → passage par une circulation
+  const circ = nearestCirculation(a.travee);
+
+  const dY1 = Math.abs(a.travee - circ);        // vers circulation
+  const dX  = Math.abs(alleeIndex(a) - alleeIndex(b)); // changement allée
+  const dY2 = Math.abs(b.travee - circ);        // vers cible
+
+  return (dY1 + dY2 + dX) * T.X;
 }
 
 function orderByNearest(start, emplacements, T) {
@@ -1181,10 +1266,10 @@ function orderByNearest(start, emplacements, T) {
 
   while (remaining.length > 0) {
     let bestIdx = 0;
-    let bestDist = distanceTravee(current, remaining[0], T);
+    let bestDist = distanceHorizontale(current, remaining[0], T);
 
     for (let i = 1; i < remaining.length; i++) {
-      const d = distanceTravee(current, remaining[i], T);
+      const d = distanceHorizontale(current, remaining[i], T);
       if (d < bestDist) {
         bestDist = d;
         bestIdx = i;
@@ -1198,7 +1283,46 @@ function orderByNearest(start, emplacements, T) {
 
   return ordered;
 }
+/**
+ * ✅ Hauteur effective canonique d'une travée
+ * - AVANT  : hauteur physique historique
+ * - APRÈS  : hauteur réimplantée (HAUTEUR_MAX + DELTA)
+ */
+function getMaxNiveauEffectif(allee, travee) {
+  const key = `${allee}_${String(travee).padStart(2, "0")}`;
 
+  // APRÈS réimplantation
+  if (IMPLANTATION_ACTIVE) {
+    return getHauteurReimplant(allee, travee);
+  }
+
+  // AVANT réimplantation
+  return HAUTEUR_MAX[key] || null;
+}
+
+function computeVerticalTimeInternal(emp, max, T) {
+  if (!max) return 0;
+
+  const niveauxGerbeur = [];
+  for (let c = 65; c <= max.charCodeAt(0); c++) {
+    const n = String.fromCharCode(c);
+    if (NIVEAU_TYPE[n] === "GERBEUR") {
+      niveauxGerbeur.push(n);
+    }
+  }
+
+  if (!niveauxGerbeur.length) return 0;
+
+  const idx = niveauxGerbeur.indexOf(emp.niveau);
+  if (idx < 0) return 0;
+
+  return idx * ((T.Zup + T.Zdown) / niveauxGerbeur.length);
+}
+function computeVerticalTime(emp, T) {
+  if (!emp) return 0;
+  const max = getMaxNiveauEffectif(emp.allee, emp.travee);
+  return computeVerticalTimeInternal(emp, max, T);
+}
 function computeTotalTime(getEmpFn, T) {
   let total = 0;
 
@@ -1219,30 +1343,34 @@ function computeTotalTime(getEmpFn, T) {
     const parcours = orderByNearest(ENTRY_POINT, emps, T);
 
     // ✅ Entrée NEF2 → premier emplacement (LE PLUS PROCHE)
-    total += distanceTravee(ENTRY_POINT, parcours[0], T);
+    total += distanceHorizontale(ENTRY_POINT, parcours[0], T);
+total += costEloignementAllee(parcours[0]); // ✅ AJOUT
 
     for (let i = 0; i < parcours.length; i++) {
       const emp = parcours[i];
 
-      // Déplacement vertical
-      const z = emp.niveau.charCodeAt(0) - 65;
-      total += (T.Zup + T.Zdown) * 2 * z;
+      // ✅ Déplacement vertical adaptatif (hauteur constante)
+total += computeVerticalTime(emp, T);
+
 
       // Gestes opérateur
       total += T.POS + T.PAL + T.UM + T.SCAN;
 
       // ✅ Vers l’emplacement suivant le plus proche
       if (i < parcours.length - 1) {
-        total += distanceTravee(emp, parcours[i + 1], T);
+        total += distanceHorizontale(emp, parcours[i + 1], T);
       }
     }
 
     // ✅ Dernier emplacement → Entrée NEF2
-    total += distanceTravee(
-      parcours[parcours.length - 1],
-      ENTRY_POINT,
-      T
-    );
+   total += distanceHorizontale(
+  parcours[parcours.length - 1],
+  ENTRY_POINT,
+  T
+);
+total += costEloignementAllee(
+  parcours[parcours.length - 1]
+); // ✅ AJOUT
 
     // ✅ Entrée NEF2 → Séquenceur
     total += TEMPS_SEQUENCEUR;
@@ -1253,6 +1381,218 @@ function computeTotalTime(getEmpFn, T) {
 }
 
 console.log("✅ BLOC G chargé");
+/************************************************
+ * VALIDATION MÉTIER — COÛT ABSOLU D’UN EMPLACEMENT
+ ************************************************/
+
+function computeEmpAbsoluteCost(emp, T) {
+  if (!emp) return Infinity;
+
+  return (
+    distanceHorizontale(ENTRY_POINT, emp, T) +
+    costEloignementAllee(emp) +
+    computeVerticalTime(emp, T)
+  );
+}
+/************************************************
+ * VALIDATION MÉTIER — MEILLEUR EMPLACEMENT PLUS BAS
+ ************************************************/
+
+function findBestLowerEmp(referenceEmp, zone, T) {
+  const refZ = referenceEmp.niveau.charCodeAt(0);
+
+  let best = null;
+  let bestCost = Infinity;
+
+  zone.forEach(e => {
+    if (
+      e.allee === referenceEmp.allee &&
+      e.travee === referenceEmp.travee &&
+      e.position === referenceEmp.position &&
+      e.niveau.charCodeAt(0) < refZ
+    ) {
+      const c = computeEmpAbsoluteCost(e, T);
+      if (c < bestCost) {
+        bestCost = c;
+        best = e;
+      }
+    }
+  });
+
+  return best;
+}
+/************************************************
+ * VALIDATION MÉTIER — STATUT D’UN EMPLACEMENT
+ ************************************************/
+
+function computeVerticalJustificationStatus(emp, zone, T) {
+  const costHere = computeEmpAbsoluteCost(emp, T);
+
+  const lower = findBestLowerEmp(emp, zone, T);
+  if (!lower) {
+    // aucun niveau plus bas disponible
+    return { status: "green", delta: 0 };
+  }
+
+  const costLower = computeEmpAbsoluteCost(lower, T);
+  const delta = costHere - costLower;
+
+  if (delta < -0.5) {
+    return { status: "green", delta };
+  }
+  if (Math.abs(delta) <= 0.5) {
+    return { status: "orange", delta };
+  }
+  return { status: "red", delta };
+}
+
+// ===== ANALYSE TEMPS VERTICAUX — FONCTIONS PURES =====
+
+function computeVerticalTimeSnapshot(emp, mode, T) {
+  const max =
+    mode === "AVANT"
+      ? HAUTEUR_MAX[`${emp.allee}_${String(emp.travee).padStart(2, "0")}`]
+      : getHauteurReimplant(emp.allee, emp.travee);
+
+  return computeVerticalTimeInternal(emp, max, T);
+}
+function analyzeVerticalTimesDiff(T) {
+  const diff = [];
+
+  Object.values(EMPLACEMENTS).forEach(e => {
+    if (!isZonePicking(e)) return;
+
+    const key = `${e.allee}_${String(e.travee).padStart(2, "0")}`;
+
+    const maxAvant = HAUTEUR_MAX[key];
+    const maxApres = getHauteurReimplant(e.allee, e.travee);
+
+    if (!maxAvant || !maxApres) return;
+
+    const tAvant = computeVerticalTimeSnapshot(e, "AVANT", T);
+const tApres = computeVerticalTimeSnapshot(e, "APRES", T);
+
+    if (tAvant === 0 && tApres === 0) return;
+
+    diff.push({
+      allee: e.allee,
+      travee: e.travee,
+      niveau: e.niveau,
+      maxAvant,
+      maxApres,
+      tAvant,
+      tApres,
+      delta: tApres - tAvant
+    });
+  });
+
+  return diff;
+}
+function summarizeVerticalImpact(diff) {
+  const map = {};
+
+  diff.forEach(d => {
+    const key = `${d.allee}_${String(d.travee).padStart(2, "0")}`;
+
+    if (!map[key]) {
+      map[key] = {
+        allee: d.allee,
+        travee: d.travee,
+        maxAvant: d.maxAvant,
+        maxApres: d.maxApres,
+        deltaTotal: 0,
+        count: 0
+      };
+    }
+
+    map[key].deltaTotal += d.delta;
+    map[key].count++;
+  });
+
+  return Object.values(map)
+    .map(o => ({
+      ...o,
+      deltaMoyen: o.deltaTotal / o.count
+    }))
+    .filter(o => o.maxAvant !== o.maxApres) // ✅ seulement impactés
+    .sort((a, b) => Math.abs(b.deltaMoyen) - Math.abs(a.deltaMoyen));
+}
+// =====================================================
+// AFFICHAGE SYNTHÈSE — GAINS TEMPS VERTICAUX AVANT / APRÈS
+// =====================================================
+
+function displayVerticalTimeGains(T) {
+  const diff = analyzeVerticalTimesDiff(T);
+  const summary = summarizeVerticalImpact(diff);
+
+
+  if (!summary.length) {
+    console.log("🟦 Impact temps verticaux — aucun changement détecté");
+    return;
+  }
+
+  // 🔹 Totaux globaux
+  const totalDelta = summary.reduce(
+    (sum, s) => sum + s.deltaTotal,
+    0
+  );
+
+  const avgDelta =
+    totalDelta / summary.reduce((s, e) => s + e.count, 0);
+
+  console.group("🟦 Synthèse gains temps verticaux — AVANT / APRÈS");
+
+  console.log(
+    `Δ total vertical (tous emplacements) : ${totalDelta.toFixed(2)} s`
+  );
+  console.log(
+    `Δ moyen par emplacement           : ${avgDelta.toFixed(4)} s`
+  );
+
+  // 🔹 Tableau détaillé par travée
+  console.table(
+    summary.map(s => ({
+      Allée: s.allee,
+      Travée: s.travee,
+      "Hauteur AVANT": s.maxAvant,
+      "Hauteur APRÈS": s.maxApres,
+      "Δ total vertical (s)": s.deltaTotal.toFixed(2),
+      "Δ moyen / empl (s)": s.deltaMoyen.toFixed(3)
+    }))
+  );
+
+  // 🔹 TOP 5 gains
+  const topGains = [...summary]
+    .sort((a, b) => a.deltaTotal - b.deltaTotal)
+    .slice(0, 5);
+
+  console.group("🟢 TOP 5 GAINS (le plus bénéfique)");
+  console.table(
+    topGains.map(s => ({
+      Allée: s.allee,
+      Travée: s.travee,
+      Gain: (-s.deltaTotal).toFixed(2) + " s"
+    }))
+  );
+  console.groupEnd();
+
+  // 🔹 TOP 5 pertes
+  const topLosses = [...summary]
+    .sort((a, b) => b.deltaTotal - a.deltaTotal)
+    .slice(0, 5);
+
+  console.group("🔴 TOP 5 PERTES (le plus pénalisant)");
+  console.table(
+    topLosses.map(s => ({
+      Allée: s.allee,
+      Travée: s.travee,
+      Perte: s.deltaTotal.toFixed(2) + " s"
+    }))
+  );
+  console.groupEnd();
+
+  console.groupEnd();
+}
 
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
@@ -1635,12 +1975,51 @@ cheminRows.forEach(row => {
         const y = VIEW.offsetY + row * VIEW.cellH;
 
         const famille = e?.famille || null;
-        const filteredOut = !empMatchesFamille(empId, FILTERS.famille);
+const zoneInterdite = isZoneInterdite(e);
+const filteredOut = !empMatchesFamille(empId, FILTERS.famille);
 
-        /* ===== FOND FAMILLE ===== */
-        ctx.fillStyle = filteredOut ? "#ffffff" : colorByFamille(famille);
-        ctx.fillRect(x + 1, y + 1, VIEW.cellW - 2, VIEW.cellH - 2);
+// 🎨 fond
+if (zoneInterdite) {
+  ctx.fillStyle = "#cfcfcf"; // gris interdit
+} else {
+  ctx.fillStyle = filteredOut ? "#ffffff" : colorByFamille(famille);
+}
 
+ctx.fillRect(x + 1, y + 1, VIEW.cellW - 2, VIEW.cellH - 2);
+
+/* ===== VALIDATION MÉTIER (VERTICAL) ===== */
+if (
+  SHOW_VERTICAL_VALIDATION &&
+  VALIDATION_VERTICAL_CACHE &&
+  VALIDATION_VERTICAL_CACHE[empId]
+) {
+  const v = VALIDATION_VERTICAL_CACHE[empId];
+
+  let color = null;
+  if (v.status === "green") color = "rgba(0,180,0,0.45)";
+  if (v.status === "orange") color = "rgba(255,165,0,0.45)";
+  if (v.status === "red") color = "rgba(220,0,0,0.45)";
+
+  if (color) {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.fillRect(
+      x + 2,
+      y + 2,
+      VIEW.cellW - 4,
+      VIEW.cellH - 4
+    );
+    ctx.restore();
+  }
+}
+
+if (zoneInterdite) {
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = "#eeeeee";
+  ctx.fillRect(x + 1, y + 1, VIEW.cellW - 2, VIEW.cellH - 2);
+  ctx.restore();
+}
         /* ===== CHEMIN VISUEL (GRISÉ UNIQUEMENT) ===== */
         if (isCheminRow(row)) {
           ctx.save();
@@ -1782,12 +2161,18 @@ function selectRectangle(c1, c2, additive) {
   const maxR = Math.max(c1.row, c2.row);
 
   for (let ai = minA; ai <= maxA; ai++) {
-    for (let r = minR; r <= maxR; r++) {
-      const key = `${NIV_REIMPLANT}|${ai}|${r}`;
-      const empId = EMP_INDEX.get(key);
-      if (empId) SELECTED.add(empId);
-    }
+  for (let r = minR; r <= maxR; r++) {
+
+    const key = `${NIV_REIMPLANT}|${ai}|${r}`;
+    const empId = EMP_INDEX.get(key);
+    if (!empId) continue;
+
+    const e = EMPLACEMENTS[empId];
+    if (isZoneInterdite(e)) continue; // 🚫 IGNORÉ
+
+    SELECTED.add(empId);
   }
+}
 }
 
 /**
@@ -2038,37 +2423,31 @@ function bindUIOnce() {
   // Changement de niveau
   levelSel?.addEventListener("change", () => {
 
+  if (INTERNAL_LEVEL_UPDATE) return; // 🔒 anti-boucle UI
+
   const isReimplantation =
     document
       .getElementById("tab-reimplantation")
       ?.classList.contains("active");
 
- if (isReimplantation) {
-  // ✅ 1️⃣ niveau courant
-  NIV_REIMPLANT = levelSel.value;
+  if (isReimplantation) {
+    // ✅ onglet Réimplantation
+    NIV_REIMPLANT = levelSel.value;
 
-  // ✅ 2️⃣ garantir existence physique complète
-  ensureFullLevel(NIV_REIMPLANT);
+    ensureFullLevel(NIV_REIMPLANT);
+    rebuildEmpIndex();
+    resizeImplantationCanvas();
+    drawZonePlan();
 
-  // ✅ 3️⃣ rebuild logique
-  rebuildEmpIndex();
+    rebuildEmplCountByFam();
+    computeAideImplantation();
 
-  // ✅ 4️⃣ resize canvas (ROWS_TOTAL dépend du niveau)
-  resizeImplantationCanvas();
-
-  // ✅ 5️⃣ redraw plan
-  drawZonePlan();
-
-  // ✅ 6️⃣ sync métier
-  rebuildEmplCountByFam();
-  computeAideImplantation();
-}
- else {
-    // 🟢 onglet Situation actuelle (HEATMAP)
+  } else {
+    // ✅ onglet Situation actuelle (heatmap)
     NIV_ACTUEL = levelSel.value;
     resizeHeatmapCanvas();
     drawHeatmapAvant();
-    drawZonePlan(); // plan actuel seulement
+    drawZonePlan();
   }
 });
 }
@@ -2139,7 +2518,11 @@ function openTab(tabId, btn) {
     .forEach(div => div.classList.remove("active"));
   document.querySelectorAll(".tab")
     .forEach(b => b.classList.remove("active"));
-
+document
+  .getElementById("btnAutoImplantImportance")
+  ?.addEventListener("click", () => {
+    autoImplantationParImportance();
+  });
   document.getElementById(tabId)?.classList.add("active");
   btn?.classList.add("active");
 
@@ -2194,10 +2577,95 @@ console.log("✅ BLOC K chargé");
 /* =====================================================
    RÉIMPLANTATION — UI AJUSTEMENT DES NIVEAUX (NOUVELLE)
 ===================================================== */
+function getSelectedReimpTravees() {
+  const sel = document.getElementById("reimpTravee");
+  if (!sel) return [];
 
+  return Array.from(sel.selectedOptions)
+    .map(o => Number(o.value))
+    .filter(n => !isNaN(n));
+}
+function adjustReimpUI(delta) {
+  const allee = reimpAllee.value;
+  const travees = getSelectedReimpTravees();
+
+  if (!travees || travees.length === 0) {
+    alert("Sélectionne au moins une travée.");
+    return;
+  }
+IMPLANTATION_ACTIVE = true; // 🔑 CRUCIAL
+
+  travees.forEach(tr => {
+    const key = `${allee}_${String(tr).padStart(2, "0")}`;
+
+    // ✅ structure robuste
+    DELTA_NIVEAUX_REIMPLANT[key] ??= { ETAGERE: 0, LISSE: 0 };
+
+    DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] += delta;
+
+// 🔒 sécurité
+DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] =
+  Math.max(0, DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU]);
+
+// ✅ ÉTAGÈRE = SOL (clé métier!)
+if (MODE_AJOUT_NIVEAU === "ETAGERE" && delta > 0) {
+  const base = HAUTEUR_MAX[key];
+  if (base) {
+    const baseIdx = base.charCodeAt(0) - 65;
+    const idx =
+      baseIdx +
+      DELTA_NIVEAUX_REIMPLANT[key].ETAGERE +
+      DELTA_NIVEAUX_REIMPLANT[key].LISSE;
+
+    const newLevel = String.fromCharCode(65 + idx);
+    NIVEAU_TYPE[newLevel] = "SOL"; // 🔑
+  }
+}
+
+    const base = HAUTEUR_MAX[key];
+    if (!base) return;
+
+    const baseIdx = base.charCodeAt(0) - 65;
+    const nbE = DELTA_NIVEAUX_REIMPLANT[key].ETAGERE;
+    const nbL = DELTA_NIVEAUX_REIMPLANT[key].LISSE;
+    const total = nbE + nbL;
+
+    // ✅ création physique réelle
+    for (let i = 1; i <= total; i++) {
+      const niv = String.fromCharCode(65 + baseIdx + i);
+      ensurePhysicalLevelFor(allee, tr, niv);
+
+      if (!(niv in NIVEAU_TYPE)) {
+        NIVEAU_TYPE[niv] = i <= nbE ? "SOL" : "LISSES";
+      }
+    }
+  });
+
+  ensureFullLevel(NIV_REIMPLANT);
+  rebuildEmpIndex();
+  resizeImplantationCanvas();
+  drawZonePlan();
+  computeAideImplantation();
+  updateReimpHeightInfo();
+  updateReimpCompositionUI();
+}
 function initReimplantHeightUI() {
   const selA = document.getElementById("reimpAllee");
   const selT = document.getElementById("reimpTravee");
+
+  // 🔴 AJOUT ICI — LIAISON TYPE D’AJOUT
+  const selMode = document.getElementById("modeAjoutNiveau");
+  if (selMode) {
+    // valeur initiale
+    MODE_AJOUT_NIVEAU = selMode.value;
+
+    // mise à jour quand l’utilisateur change le select
+    selMode.addEventListener("change", () => {
+      MODE_AJOUT_NIVEAU = selMode.value;
+      updateReimpHeightInfo();
+    });
+  }
+  // 🔴 FIN AJOUT
 
   if (!selA || !selT) return;
 
@@ -2219,7 +2687,10 @@ function initReimplantHeightUI() {
     selT.appendChild(opt);
   }
 
-  selA.addEventListener("change", updateReimpHeightInfo);
+  selA.addEventListener("change", () => {
+  updateReimpHeightInfo();
+  updateReimpCompositionUI();
+});
   selT.addEventListener("change", updateReimpHeightInfo);
 
   updateReimpHeightInfo();
@@ -2227,11 +2698,20 @@ function initReimplantHeightUI() {
 
 function updateReimpHeightInfo() {
   const allee = reimpAllee.value;
-  const tr = reimpTravee.value;
+  const travees = getSelectedReimpTravees();
+if (travees.length !== 1) {
+  // UI mono-travée uniquement
+  document.getElementById("reimpBaseHeight").textContent = "—";
+  document.getElementById("reimpDelta").textContent = "—";
+  document.getElementById("reimpFinalHeight").textContent = "—";
+  return;
+}
+const tr = travees[0];
   const key = `${allee}_${String(tr).padStart(2, "0")}`;
 
   const base = HAUTEUR_MAX[key];
-  const delta = DELTA_NIVEAUX_REIMPLANT[key] || 0;
+  const d = DELTA_NIVEAUX_REIMPLANT[key] || { ETAGERE: 0, LISSE: 0 };
+const delta = d.ETAGERE + d.LISSE;
 
   document.getElementById("reimpBaseHeight").textContent = base || "—";
   document.getElementById("reimpDelta").textContent =
@@ -2248,55 +2728,112 @@ function updateReimpHeightInfo() {
   document.getElementById("reimpFinalHeight").textContent =
     String.fromCharCode(65 + finalIdx);
 }
+// =====================================================
+// RÉIMPLANTATION — CALCUL DES AJOUTS RÉELS (PAR TRAVÉE)
+// =====================================================
 
-function adjustReimpUI(delta) {
+function computeAddedLevelsBySelection(allee, travees) {
+  const result = {
+    perTravee: [],
+    totalSol: 0,
+    totalLisses: 0,
+    totalLevels: 0
+  };
+
+  travees.forEach(tr => {
+    const key = `${allee}_${String(tr).padStart(2, "0")}`;
+    const base = HAUTEUR_MAX[key];
+    if (!base) return;
+
+    const d = DELTA_NIVEAUX_REIMPLANT[key] || { ETAGERE: 0, LISSE: 0 };
+    const sol = d.ETAGERE || 0;
+    const lisses = d.LISSE || 0;
+    const total = sol + lisses;
+
+    if (total <= 0) return;
+
+    result.perTravee.push({
+      travee: tr,
+      sol,
+      lisses,
+      total
+    });
+
+    result.totalSol += sol;
+    result.totalLisses += lisses;
+    result.totalLevels += total;
+  });
+
+  return result;
+}
+function aggregateAddedLevelsByCount(summary) {
+  const groups = {};
+
+  summary.perTravee.forEach(t => {
+    groups[t.count] ??= [];
+    groups[t.count].push(t.travee);
+  });
+
+  return Object.entries(groups)
+    .map(([count, travees]) => ({
+      count: Number(count),
+      travees,
+      nb: travees.length
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+function setAjoutMode(mode) {
+  if (mode !== "ETAGERE" && mode !== "LISSE") return;
+  MODE_AJOUT_NIVEAU = mode;
+}
+
+// =====================================================
+// AFFICHAGE — AJOUTS RÉELS (UX MÉTIER)
+// =====================================================
+function updateReimpCompositionUI() {
+  const solLine   = document.getElementById("reimpSolLine");
+  const lisseLine = document.getElementById("reimpLisseLine");
+  const solCount  = document.getElementById("reimpSolCount");
+  const lisseCount= document.getElementById("reimpLisseCount");
+  const impactEl  = document.getElementById("reimpImpact");
+
+  if (!solLine || !lisseLine || !impactEl) return;
 
   const allee = reimpAllee.value;
   const travees = getSelectedReimpTravees();
 
   if (!travees.length) {
-    alert("Sélectionne au moins une travée.");
+    solLine.style.display = "none";
+    lisseLine.style.display = "none";
+    impactEl.textContent = "—";
     return;
   }
 
-  travees.forEach(tr => {
-    const key = `${allee}_${String(tr).padStart(2, "0")}`;
+  const summary = computeAddedLevelsBySelection(allee, travees);
 
-    const oldDelta = DELTA_NIVEAUX_REIMPLANT[key] || 0;
-    const newDelta = oldDelta + delta;
-    DELTA_NIVEAUX_REIMPLANT[key] = newDelta;
+  // --- ÉTAGÈRES ---
+  if (summary.totalSol > 0) {
+    solLine.style.display = "block";
+    solCount.textContent = summary.totalSol;
+  } else {
+    solLine.style.display = "none";
+  }
 
-    // ✅ Calcul ancien / nouveau niveau MAX
-    const base = HAUTEUR_MAX[key];
-    if (!base) return;
+  // --- LISSES ---
+  if (summary.totalLisses > 0) {
+    lisseLine.style.display = "block";
+    lisseCount.textContent = summary.totalLisses;
+  } else {
+    lisseLine.style.display = "none";
+  }
 
-    const oldIdx = Math.max(0, base.charCodeAt(0) - 65 + oldDelta);
-    const newIdx = Math.max(0, base.charCodeAt(0) - 65 + newDelta);
-
-    // ✅ UNIQUEMENT si on AJOUTE des niveaux
-    if (newIdx > oldIdx) {
-      for (let i = oldIdx + 1; i <= newIdx; i++) {
-        const niv = String.fromCharCode(65 + i);
-        ensurePhysicalLevelFor(allee, tr, niv);
-      }
-    }
-  });
-// ✅ CORRECTION 2 — garantir que le niveau affiché existe PARTOUT
-if (NIV_REIMPLANT) {
-  ensureFullLevel(NIV_REIMPLANT);
+  // --- IMPACT VERTICAL ---
+  const impact = summary.totalLisses > 0 ? "augmenté" : "neutre";
+  impactEl.textContent = impact;
+  impactEl.style.color =
+    impact === "augmenté" ? "#c62828" : "#2e7d32";
 }
-  updateReimpHeightInfo();
-// ✅ Rebuild index uniquement si le niveau affiché est impacté
-const nivCourant = NIV_REIMPLANT;
 
-updateReimpHeightInfo();
-
-rebuildEmpIndex();
-resizeImplantationCanvas();
-drawZonePlan();
-computeAideImplantation();
-fillLevelSelect();
-}
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC K2 — RESIZE CANVAS & AIDE À L’IMPLANTATION
@@ -2352,8 +2889,10 @@ function adjustReimplantLevels(delta) {
   const tr = heightTravee.value;
   const key = `${allee}_${String(tr).padStart(2, "0")}`;
 
-  DELTA_NIVEAUX_REIMPLANT[key] =
-    (DELTA_NIVEAUX_REIMPLANT[key] || 0) + delta;
+  DELTA_NIVEAUX_REIMPLANT[key] ??= { ETAGERE: 0, LISSE: 0 };
+DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] += delta;
+DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] =
+  Math.max(0, DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU]);
 
   console.log(
     "🔧 Δ niveaux réimplantation",
@@ -2365,6 +2904,7 @@ function adjustReimplantLevels(delta) {
   resizeImplantationCanvas();
   drawZonePlan();
   computeAideImplantation();
+  updateReimpCompositionUI();
 }
 
 console.log("✅ BLOC K2 chargé");
@@ -2805,9 +3345,11 @@ NIV_ACTUEL = getExistingLevels()[0] || "A";
 NIV_REIMPLANT = NIV_ACTUEL;
 
 // 4️⃣ ✅ SNAPSHOT ESPACE AVANT = ENTREPÔT RÉEL
-window.__SPACE_AVANT = computeSpaceSnapshot(
-  EMPLACEMENTS,   // ← base physique complète (HAUTEUR_MAX)
-  STOCK_BY_EMP
+window.__SPACE_AVANT = Object.freeze(
+  computeSpaceSnapshot(
+    EMPLACEMENTS,
+    STOCK_BY_EMP
+  )
 );
 
 // 5️⃣ Préparation de la réimplantation (APRÈS)
@@ -2866,16 +3408,16 @@ drawHeatmapAvant(); // ✅ SURIMPRESSION
     await nextFrame();
 
     const T = {
-      X: +tX.value,
-      Zup: +tZup.value,
-      Zdown: +tZdown.value,
-      ROT: +tRot.value,
-      POS: +tPos.value,
-      PAL: +tPal.value,
-      UM: +tUM.value,
-      SCAN: +tScan.value,
-      MARGE: +tMarge.value / 100
-    };
+  X:     +tX.value,
+  Zup:   +tZup.value,     // TOTAL montée
+  Zdown: +tZdown.value,   // TOTAL descente
+  ROT:   +tRot.value,
+  POS:   +tPos.value,
+  PAL:   +tPal.value,
+  UM:    +tUM.value,
+  SCAN:  +tScan.value,
+  MARGE: +tMarge.value / 100
+};
 
     const tempsAvant = computeTotalTime(l => empFromId(l.empId), T);
     const minutesParLigne =
@@ -2985,29 +3527,27 @@ function computeAideImplantation() {
   // ✅ Familles à considérer dans l'aide
 // ✅ Familles prises en compte dans l'aide à l'implantation
 const familles = new Set([
-  ...STRUCTURING_FAMILIES,              // ✅ TA, EL, RO, … EM, GN
+  ...STRUCTURING_FAMILIES,
   ...Object.keys(besoinStockByFam),
   ...Object.keys(besoinFluxByFam)
 ]);
 
-  familles.forEach(famBrute => {
-    const fam = getFamilleImplantation(famBrute);
+familles.forEach(fam => {
+  if (!agg[fam]) {
+    agg[fam] = {
+      fam,
+      besoinStockEmpl: 0,
+      besoinFluxRef: 0,
+      cap: 1,
+      besoinFluxEmpl: 0,
+      besoinCibleRaw: 0,
+      besoinCible: 0
+    };
+  }
 
-    if (!agg[fam]) {
-      agg[fam] = {
-        fam,
-        besoinStockEmpl: 0,
-        besoinFluxRef: 0,
-        cap: 1,
-        besoinFluxEmpl: 0,
-        besoinCibleRaw: 0,
-        besoinCible: 0
-      };
-    }
-
-    agg[fam].besoinStockEmpl += besoinStockByFam[famBrute] || 0;
-    agg[fam].besoinFluxRef  += besoinFluxByFam[famBrute]  || 0;
-  });
+  agg[fam].besoinStockEmpl += besoinStockByFam[fam] || 0;
+  agg[fam].besoinFluxRef  += besoinFluxByFam[fam]  || 0;
+});
 
   /* =========================
      CONVERSION FLUX → EMPLACEMENTS
@@ -3137,6 +3677,47 @@ rows.forEach(r => {
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC M — COMPARAISON & AFFECTATION RÉELLE
  ************************************************/
+function computeImportanceByFamilleWithWeights(weights) {
+
+  const flux   = HISTO_ANALYSIS?.p80FluxByFam || {};
+  const rotBrut = computeRotationByFamille();
+  const cible  = window.__BESOIN_CIBLE_PAR_FAM || {};
+  const cap    = computeCapaciteReelleByFamille();
+
+  const importance = {};
+
+  Object.keys(cible).forEach(fam => {
+
+    const fFlux  = flux[fam] || 0;
+    const fRot   = rotBrut[fam] || 0;
+    const fStock = cible[fam] || 0;
+    const fCap   = cap[fam] || 1;
+
+    importance[fam] =
+      weights.flux     * fFlux +
+      weights.rotation * fRot +
+      weights.stock    * (fStock / fCap);
+  });
+
+  return importance;
+}
+function buildImportanceStrategies() {
+  return [
+    {
+      name: "Flux prioritaire",
+      weights: { flux: 0.6, rotation: 0.3, stock: 0.1 }
+    },
+    {
+      name: "Équilibrée",
+      weights: { flux: 0.4, rotation: 0.3, stock: 0.3 }
+    },
+    {
+      name: "Capacité prioritaire",
+      weights: { flux: 0.3, rotation: 0.2, stock: 0.5 }
+    }
+  ];
+}
+
 function buildPhysicalColumns() {
   const colonnes = {};
 
@@ -3332,14 +3913,48 @@ function sortZoneByProximity(zone) {
       Math.abs(b.travee - ENTRY_POINT.travee)
   );
 }
+// =====================================================
+// SCORE D’EFFICACITÉ D’UN EMPLACEMENT
+// (bas + proche entrée = meilleur)
+// =====================================================
+
+function computeEmplacementEfficiencyScore(emp, T) {
+
+  // 🔽 1) Coût vertical réel (déjà défini ailleurs)
+  const costVertical = computeVerticalTime(emp, T);
+
+  // ↔ 2) Coût horizontal depuis l’entrée
+  const costHorizontal = distanceHorizontale(
+    ENTRY_POINT,
+    emp,
+    T
+  );
+
+  // 🧱 3) Pénalité structurelle d’allée
+  const costAllee = costEloignementAllee(emp);
+
+  // ⚖️ Pondérations métier
+  const Wz = 1.0;
+  const Wh = 1.0;
+  const Wa = 1.0;
+
+  return Wz * costVertical + Wh * costHorizontal + Wa * costAllee;
+}
 
 /**
  * Affectation réaliste des références APRÈS implantation
  */
 function assignReferencesToEmplacements() {
+
   if (!IMPLANTATION_ACTIVE) {
     return { feasible: false, reason: "Implantation absente" };
   }
+
+  const T = {
+    X: +tX.value,
+    Zup: +tZup.value,
+    Zdown: +tZdown.value
+  };
 
   const refUsage   = computeRefUsage();
   const zonesByFam = buildZonesByFamille();
@@ -3349,32 +3964,50 @@ function assignReferencesToEmplacements() {
   const errors = [];
 
   Object.keys(refsByFam).forEach(fam => {
+
     const refs = refsByFam[fam];
 
-    // 🔒 règle absolue : une famille structurante ne peut PAS aller en AUT
+    // 🔒 règle métier absolue
     if (fam !== "AUT" && !zonesByFam[fam]) {
-      errors.push({
-        famille: fam,
-        refs: refs.slice(0, 10) // debug léger
-      });
+      errors.push({ famille: fam, refs: refs.slice(0, 5) });
       return;
     }
 
     const zone = zonesByFam[fam];
     if (!zone || zone.length === 0) return;
 
-    const sortedZone = sortZoneByProximity(zone);
+    // ✅ TRI DES EMPLACEMENTS PAR EFFICACITÉ
+    // ✅ TRI PAR EFFICACITÉ
+const empsSortedRaw = [...zone].sort((a, b) =>
+  computeEmplacementEfficiencyScore(a, T) -
+  computeEmplacementEfficiencyScore(b, T)
+);
 
+// ✅ FILTRAGE MÉTIER VERTICAL — 🔴 BLOQUÉS
+const empsSorted = empsSortedRaw.filter(emp =>
+  isVerticalPlacementAllowed(emp, zone, T)
+);
+
+// 🔒 GARDE-FOU ULTIME
+if (empsSorted.length === 0) {
+  console.warn(
+    "❌ Aucun emplacement verticalement autorisé",
+    fam
+  );
+  return;
+}
+
+    // ✅ refs déjà triées par importance (flux décroissant)
     refs.forEach((ref, i) => {
-      const emp = sortedZone[i % sortedZone.length];
+      const emp = empsSorted[i % empsSorted.length];
 
-      // 🔥 Garde-fou ultime (sécurité)
-      if (fam !== "AUT" && emp.famille === "AUT") {
+      // garde‑fou ultime
+      if (fam !== "AUT" && emp.famille !== fam) {
         errors.push({
           ref,
-          familleRef: fam,
+          famRef: fam,
           empId: emp.empId,
-          familleEmp: emp.famille
+          famEmp: emp.famille
         });
         return;
       }
@@ -3383,12 +4016,11 @@ function assignReferencesToEmplacements() {
     });
   });
 
-  // ❌ incohérence métier bloquante
   if (errors.length > 0) {
-    console.error("❌ Implantation invalide — familles sous-dimensionnées :", errors);
+    console.error("❌ Implantation références invalide", errors);
     return {
       feasible: false,
-      reason: "Familles structurantes sans capacité suffisante",
+      reason: "Conflit famille / emplacement",
       errors
     };
   }
@@ -3398,11 +4030,10 @@ function assignReferencesToEmplacements() {
     refToEmp
   };
 }
+
 /* =========================
    COMPTAGE DES EMPLACEMENTS
 ========================= */
-
-const SURFACE_PAR_EMPLACEMENT = 0.96; // m² (80 x 120 cm)
 
 /**
  * Compte les emplacements distincts utilisés AVANT
@@ -3431,6 +4062,50 @@ function countUsedEmplacementsApres(refToEmp) {
 
   return set.size;
 }
+function computeExecutiveSummary({
+  deltaTempsTotalSecondes,
+  DT,
+  coutHoraireETP,
+  heuresETPParAn
+}) {
+  const dates = DT.filter(d => d instanceof Date && !isNaN(d));
+  const minDate = new Date(Math.min(...dates));
+  const maxDate = new Date(Math.max(...dates));
+
+  const dureeJours =
+    (maxDate - minDate) / (1000 * 60 * 60 * 24);
+
+  const heuresTotales =
+    deltaTempsTotalSecondes / 3600;
+
+  const heuresParJour =
+    heuresTotales / dureeJours;
+
+  const etpEquivalent =
+    heuresTotales / heuresETPParAn;
+
+  const economieParJour =
+    heuresParJour * coutHoraireETP;
+
+  const economieParAn =
+    economieParJour * 365;
+
+  return {
+    minDate,
+    maxDate,
+    dureeJours,
+    heuresParJour,
+    etpEquivalent,
+    economieParJour,
+    economieParAn
+  };
+}
+// =========================
+// PARAMÈTRES SOCIAUX / FINANCIERS
+// =========================
+const COUT_HORAIRE_ETP = 38;     // € / heure (à ajuster)
+const HEURES_ETP_PAR_AN = 1600; // h / an (base réaliste)
+
 /**
  * Comparaison AVANT / APRÈS
  */
@@ -3442,14 +4117,6 @@ if (!IMPLANTATION_ACTIVE) {
   alert("Implantation non définie — comparaison impossible.");
   return;
 }
-
-  const assign = assignReferencesToEmplacements();
-  if (!assign || !assign.refToEmp) {
-    out.innerHTML = "<b>Comparaison impossible</b>";
-    return;
-  }
-
-  checkMappingCoherence(assign.refToEmp);
 
   const T = {
     X: +tX.value,
@@ -3463,24 +4130,71 @@ if (!IMPLANTATION_ACTIVE) {
     MARGE: +tMarge.value / 100
   };
 
+ const assign = assignReferencesToEmplacements();
+  if (!assign || !assign.refToEmp) {
+    out.innerHTML = "<b>Comparaison impossible</b>";
+    return;
+  }
+  // ✅ Construction validation métier verticale
+buildVerticalValidationMap(assign.refToEmp, T);
+  checkMappingCoherence(assign.refToEmp);
+
   const tempsAvant = computeTotalTime(
-    l => empFromId(l.empId),
-    T
-  );
+  l => empFromId(l.empId),
+  T
+);
 
-  const REF_TO_EMP_APRES = assign.refToEmp;
+const REF_TO_EMP_APRES = assign.refToEmp;
 
-  const tempsApres = computeTotalTime(
-    l => {
-      const empId = REF_TO_EMP_APRES[l.article];
-      if (!empId) return null;
-      return empFromId(empId);
-    },
-    T
-  );
+const tempsApres = computeTotalTime(
+  l => {
+    const empId = REF_TO_EMP_APRES[l.article];
+    if (!empId) return null;
+    return empFromId(empId);
+  },
+  T
+);
+// ✅ Gain absolu et pourcentage
+const gainSecondes = tempsAvant - tempsApres;
+const pct = tempsAvant > 0
+  ? (gainSecondes / tempsAvant) * 100
+  : 0;
 
-  const gain = tempsAvant - tempsApres;
-  const pct = tempsAvant > 0 ? (gain / tempsAvant) * 100 : 0;
+// ✅ DELTA CORRECT
+const deltaTempsTotalSecondes =
+  tempsAvant - tempsApres;
+
+// ✅ RÉSUMÉ EXÉCUTIF BASÉ SUR DATES DT
+const exec = computeExecutiveSummary({
+  deltaTempsTotalSecondes,
+  DT: Object.values(PREP_DATES),
+  coutHoraireETP: COUT_HORAIRE_ETP,
+  heuresETPParAn: HEURES_ETP_PAR_AN
+});
+
+// ✅ BARRE TEMPORELLE DT
+document.getElementById("kpiDateStart").textContent =
+  exec.minDate.toLocaleDateString();
+
+document.getElementById("kpiDateEnd").textContent =
+  exec.maxDate.toLocaleDateString();
+
+document.getElementById("kpiNbDays").textContent =
+  Math.round(exec.dureeJours);
+
+// ✅ KPI OFFICIELS
+document.getElementById("kpiHoursDay").textContent =
+  exec.heuresParJour.toFixed(1) + " h";
+
+document.getElementById("kpiETP").textContent =
+  exec.etpEquivalent.toFixed(2);
+
+document.getElementById("kpiEcoDay").textContent =
+  exec.economieParJour.toFixed(0) + " €";
+
+document.getElementById("kpiEcoYear").textContent =
+  exec.economieParAn.toFixed(0) + " €";
+
 /* =========================
    PRODUCTIVITÉ
 ========================= */
@@ -3509,7 +4223,9 @@ const lignesParHeureApres =
 // ✅ AVANT : snapshot pris après import stock + DT
 const spaceAvant = window.__SPACE_AVANT;
 
-// ✅ APRÈS : structure ACTUELLE (niveaux modifiés ou non)
+// ✅ matérialiser les niveaux ajoutés AVANT le calcul APRÈS
+ensureAllPhysicalEmplacements();
+
 const spaceApres = computeSpaceSnapshotApres(
   EMPLACEMENTS,
   STOCK_BY_EMP
@@ -3638,6 +4354,56 @@ const deltaSurface = spaceApres.surfaceTotal - spaceAvant.surfaceTotal;
 </div>
 `;
 }
+/* ================= KPI COMPARAISON — CONSTANTES ================= */
+
+// Hypothèses RH
+const HEURES_PAR_ETP_JOUR = 7;
+
+// SMIC horaire brut (France – 2026)
+const SMIC_HORAIRE_BRUT = 12.02;
+
+// Hypothèse jours ouvrés
+const JOURS_OUVRES_PAR_AN = 220;
+function computeComparisonKPIs({
+  heuresGagneesParJour
+}) {
+  // 1️⃣ ETP gagné
+  const etp = heuresGagneesParJour / HEURES_PAR_ETP_JOUR;
+
+  // 2️⃣ Économie brute
+  const ecoJour = heuresGagneesParJour * SMIC_HORAIRE_BRUT;
+  const ecoAn   = ecoJour * JOURS_OUVRES_PAR_AN;
+
+  return {
+    heuresJour: heuresGagneesParJour,
+    etp,
+    ecoJour,
+    ecoAn
+  };
+}
+function displayComparisonKPIs(kpi) {
+  document.getElementById("kpiHoursDay").textContent =
+    `${kpi.heuresJour.toFixed(1)} h`;
+
+  document.getElementById("kpiETP").textContent =
+    kpi.etp.toFixed(2);
+
+  document.getElementById("kpiEcoDay").textContent =
+    `${kpi.ecoJour.toFixed(0)} €`;
+
+  document.getElementById("kpiEcoYear").textContent =
+    `${kpi.ecoAn.toFixed(0)} €`;
+
+  document.getElementById("kpiSummaryText").innerHTML = `
+    ✅ L’implantation permet un <b>gain opérationnel de
+    ${kpi.heuresJour.toFixed(1)} heures par jour</b>,
+    soit l’équivalent de <b>${kpi.etp.toFixed(2)} ETP</b>.<br>
+    À salaire minimum légal, cela représente une économie
+    d’environ <b>${kpi.ecoAn.toFixed(0)} € brut par an</b>,
+    sans dégradation des conditions de picking.
+  `;
+}
+
 /**
  * Vérifie la cohérence famille ↔ emplacement
  */
@@ -3670,6 +4436,52 @@ const famRefImpl  = getFamilleImplantation(
 }
 
 console.log("✅ BLOC M (final) chargé");
+/************************************************
+ * CONSTRUCTION DE LA VALIDATION VISUELLE
+ ************************************************/
+
+function buildVerticalValidationMap(refToEmp, T) {
+  VALIDATION_VERTICAL_CACHE = {};
+
+  const zonesByFam = buildZonesByFamille();
+
+  Object.entries(refToEmp).forEach(([ref, empId]) => {
+    const emp = EMPLACEMENTS[empId];
+    if (!emp) return;
+
+    const fam = emp.famille;
+    const zone = zonesByFam[fam];
+    if (!zone) return;
+
+    const result =
+      computeVerticalJustificationStatus(emp, zone, T);
+
+    VALIDATION_VERTICAL_CACHE[empId] = {
+      ref,
+      status: result.status,
+      delta: result.delta
+    };
+  });
+
+  console.log(
+    "✅ Validation verticale construite",
+    VALIDATION_VERTICAL_CACHE
+  );
+}
+/************************************************
+ * RÈGLE MÉTIER — EMPLACEMENT AUTORISÉ OU NON
+ * 🔴 BLOQUANT si un meilleur emplacement plus bas existe
+ ************************************************/
+
+function isVerticalPlacementAllowed(emp, zone, T) {
+  const verdict = computeVerticalJustificationStatus(emp, zone, T);
+
+  // 🔴 interdit strictement
+  if (verdict.status === "red") return false;
+
+  // 🟠 ou 🟢 autorisé
+  return true;
+}
 
 /************************************************
  * UTILITAIRE — ROTATION PAR FAMILLE
@@ -3698,12 +4510,13 @@ function buildAutoImplantationContext() {
   const colonnes = {};
 
   Object.entries(EMPLACEMENTS).forEach(([empId, e]) => {
-    if (!isZonePicking(e)) return;
+  if (!isZonePicking(e)) return;
+  if (isZoneInterdite(e)) return; // 🚫 AUTO-IMPLANT BLOQUÉ
 
-    const key = `${e.allee}|${e.travee}|${e.position}`;
-    colonnes[key] ??= [];
-    colonnes[key].push(e);
-  });
+  const key = `${e.allee}|${e.travee}|${e.position}`;
+  colonnes[key] ??= [];
+  colonnes[key].push(e);
+});
 
   // TRI vertical A → B → C
   Object.values(colonnes).forEach(col =>
@@ -3723,9 +4536,14 @@ function buildAutoImplantationContext() {
 
   return { colonnes, empIndex };
 }
-async function autoImplantationParBlocs_2Phases() {
+async function autoImplantationParBlocs_2Phases(strategy) {
 
-  console.log("▶ autoImplantationParBlocs_2Phases appelée");
+  if (!strategy || !strategy.weights) {
+  console.error("Stratégie invalide", strategy);
+  return { ok: false, reason: "invalid-strategy" };
+}
+
+  console.log("▶ autoImplantationParBlocs_2Phases appelée", strategy.name);
 
 // ✅ Sécurité : synchroniser le niveau courant avant auto
 const niveaux = getExistingLevels();
@@ -3739,7 +4557,9 @@ if (!niveaux.includes(NIV_REIMPLANT)) {
   ===================================================== */
 
   Object.values(EMPLACEMENTS).forEach(e => {
-  if (isZonePicking(e)) e.famille = null;
+  if (!isZonePicking(e)) return;
+  if (isZoneInterdite(e)) return; // 🚫 NE PAS TOUCHER
+  e.famille = null;
 });
 
   const allees = ALLEES.split("");
@@ -3765,36 +4585,35 @@ if (!niveaux.includes(NIV_REIMPLANT)) {
       });
     });
   });
+function computeBlocSpeedScore(bloc) {
+  // Distance moyenne du bloc à l’entrée picking
+  const midTravee = (bloc.tStart + bloc.tEnd) / 2;
 
-  /* =====================================================
-     PHASE 2 — DONNÉES MÉTIER
-  ===================================================== */
+  const dist = Math.abs(midTravee - ENTRY_POINT.travee);
 
-  const p80 = HISTO_ANALYSIS.p80FluxByFam || {};
-  const rotationRaw = computeRotationByFamille();
-const rotation = {};
-
-Object.entries(rotationRaw).forEach(([famBrute, val]) => {
-  const fam = getFamilleImplantation(famBrute);
-  if (!fam || fam === "AUT") return;
-  rotation[fam] = (rotation[fam] || 0) + val;
+  // Plus c’est proche → score élevé
+  return 1 / (1 + dist);
+}
+blocs.forEach(b => {
+  b.speedScore = computeBlocSpeedScore(b);
 });
+/* =====================================================
+   PHASE 2 — IMPORTANCE FAMILLES (DÉTERMINISTE)
+   ✅ basée sur stratégie métier
+===================================================== */
 
+// stratégie passée en paramètre
+const importance =
+  computeImportanceByFamilleWithWeights(strategy.weights);
 
-  // importance = P80 × rotation (AUT incluse)
-  const importance = {};
-  let sommeImportance = 0;
+// ✅ familles triées par importance décroissante
+const famillesTriees = Object.keys(importance)
+  .sort((a, b) => importance[b] - importance[a]);
 
-  Object.keys(p80).forEach(fam => {
-    const val = (p80[fam] || 0) * (rotation[fam] || 1);
-    importance[fam] = val;
-    sommeImportance += val;
-  });
-
-  if (sommeImportance === 0) {
-    alert("❌ Importance totale nulle — implantation impossible");
-    return;
-  }
+if (!famillesTriees.length) {
+  console.warn("Aucune famille prioritaire");
+  return { ok: false, reason: "no-family" };
+}
 
   /* =====================================================
      PHASE 3 — CIBLE PHYSIQUE MINIMUM (P80 STRICT)
@@ -3803,10 +4622,9 @@ Object.entries(rotationRaw).forEach(([famBrute, val]) => {
   const cibleEmpl = window.__BESOIN_CIBLE_PAR_FAM || {};
 
 if (!Object.keys(cibleEmpl).length) {
-  alert("❌ Besoin cible indisponible. Lance l’aide à l’implantation d’abord.");
-  return;
+  console.warn("Besoin cible indisponible");
+  return { ok: false, reason: "no-target" };
 }
-
   /* =====================================================
    PHASE 4 — CAPACITÉ D’UN BLOC (CORRIGÉE)
    ✅ basée sur la structure APRÈS (Δ niveaux inclus)
@@ -3820,8 +4638,8 @@ const capBloc =
   / allees.length;
 
 if (!capBloc || capBloc <= 0) {
-  alert("❌ Capacité de bloc nulle — structure invalide");
-  return;
+  console.error("Capacité de bloc invalide");
+  return { ok: false, reason: "no-capacity" };
 }
 
 /* =====================================================
@@ -3835,7 +4653,8 @@ Object.keys(cibleEmpl).forEach(fam => {
     Math.ceil(cibleEmpl[fam] / capBloc)
   );
 });
-
+// ✅ blocs les PLUS RAPIDES d'abord
+blocs.sort((a, b) => b.speedScore - a.speedScore);
   /* =====================================================
      PHASE 6 — ATTRIBUTION BLOCS MINIMUM
   ===================================================== */
@@ -3858,6 +4677,17 @@ Object.keys(cibleEmpl).forEach(fam => {
       blocIdx++;
     }
   });
+/* =====================================================
+   PHASE 6.5 — SOMME DES IMPORTANCES
+===================================================== */
+
+const sommeImportance = Object.values(importance)
+  .reduce((a, b) => a + b, 0);
+
+if (!sommeImportance || sommeImportance <= 0) {
+  alert("❌ Importance totale nulle — auto-implantation impossible");
+  return;
+}
 
   /* =====================================================
      PHASE 7 — BLOCS DE SURPLUS (RÉPARTITION %)
@@ -3873,19 +4703,12 @@ Object.keys(cibleEmpl).forEach(fam => {
   });
 
   let idxFam = 0;
-  const famsParImportance = Object.keys(poids)
-    .sort((a, b) => poids[b] - poids[a]);
 
-  blocsRestants.forEach(bloc => {
-    const fam = famsParImportance[idxFam % famsParImportance.length];
-    bloc.fam = fam;
-    blocsAttribues[fam].push(bloc);
-    idxFam++;
-  });
-// ✅ Compteur de pose par famille
-const posesParFam = {};
-Object.keys(blocsAttribues).forEach(fam => {
-  posesParFam[fam] = 0;
+blocsRestants.forEach(bloc => {
+  const fam = famillesTriees[idxFam % famillesTriees.length];
+  bloc.fam = fam;
+  blocsAttribues[fam].push(bloc);
+  idxFam++;
 });
 
 /* =====================================================
@@ -3989,7 +4812,7 @@ const totalBlocs = blocs.length;
 
 for (const bloc of blocs) {
 
-  const familleBloc = bloc.fam || "AUT";
+const familleBloc = bloc.fam || "AUT";
 
   /* =========================================
      1️⃣ Collecte des colonnes PHYSIQUES du bloc
@@ -4040,31 +4863,33 @@ for (const bloc of blocs) {
     continue;
   }
 
-  /* =========================================
-     3️⃣ Pose réelle du bas vers le haut
-        ✅ uniquement sur niveaux libres
-  ========================================= */
+/* =========================================
+   3️⃣ Pose réelle du bas vers le haut
+   ✅ bloc entier affecté à UNE famille
+========================================= */
 
-  for (const colonne of colonnesValides) {
-    for (const e of colonne) {
-      if (e.famille !== null) continue;
+for (const colonne of colonnesValides) {
+  for (const e of colonne) {
+    if (isZoneInterdite(e)) continue; // 🚫 INTERDIT
+    if (e.famille !== null) continue;
 
-      e.famille = familleBloc;
-      posesCapaciteParFam[familleBloc]++;
-    }
+    e.famille = familleBloc;
+    posesCapaciteParFam[familleBloc]++;
   }
+}
 
   /* =========================================
      4️⃣ Progression
   ========================================= */
   doneBlocs++;
-  showAutoProgress(
-    `Implantation automatique (${doneBlocs}/${totalBlocs})`,
-    Math.round((doneBlocs / totalBlocs) * 100)
-  );
 
-  await new Promise(r => requestAnimationFrame(r));
-}
+showAutoProgress(
+  `Implantation automatique : ${strategy.name}`,
+  Math.round((doneBlocs / totalBlocs) * 100)
+);
+
+// ✅ laisse respirer le browser
+await nextFrame();
 
 /* =====================================================
    GARANTIE ANTI-TROUS – FIN D'AUTO-IMPLANTATION
@@ -4072,6 +4897,7 @@ for (const bloc of blocs) {
 
 Object.values(EMPLACEMENTS).forEach(e => {
   if (!isZonePicking(e)) return;
+  if (isZoneInterdite(e)) return; // 🚫 PAS DE AUT AUTO
 
   if (e.famille === null) {
     e.famille = "AUT";
@@ -4087,8 +4913,6 @@ rebuildEmpIndex();
 drawZonePlan();
 rebuildEmplCountByFam();
 computeAideImplantation();
-
-alert("✅ Implantation par blocs terminée");
 }
 
 /************************************************
@@ -4124,6 +4948,9 @@ function duplicateLevelFamille(sourceLevel, targetLevels, mode = "overwrite") {
   drawZonePlan();
   rebuildEmplCountByFam();
   computeAideImplantation();
+}
+
+  return { ok: true };
 }
 
 /* =========================
@@ -4177,3 +5004,108 @@ if (!targets.length) {
 });
 
 console.log("✅ FIN FICHIER ATTEINTE");
+function snapshotImplantation() {
+  const snap = {};
+
+  Object.entries(EMPLACEMENTS).forEach(([empId, e]) => {
+    if (!isZonePicking(e)) return;
+    snap[empId] = e.famille;
+  });
+
+  return snap;
+}
+function restoreImplantation(snapshot) {
+  if (!snapshot) return;
+
+  Object.entries(snapshot).forEach(([empId, fam]) => {
+    if (EMPLACEMENTS[empId]) {
+      EMPLACEMENTS[empId].famille = fam;
+    }
+  });
+}
+async function autoImplantationParImportance() {
+
+  if (AUTO_IMPLANT_RUNNING) return;
+  AUTO_IMPLANT_RUNNING = true;
+
+  try {
+    const strategies = buildImportanceStrategies();
+
+    let bestTime = Infinity;
+    let bestSnapshot = null;
+    let bestName = "";
+
+    const T = {
+      X: +tX.value,
+      Zup: +tZup.value,
+      Zdown: +tZdown.value,
+      ROT: +tRot.value,
+      POS: +tPos.value,
+      PAL: +tPal.value,
+      UM: +tUM.value,
+      SCAN: +tScan.value,
+      MARGE: +tMarge.value / 100
+    };
+
+    const total = strategies.length;
+    let done = 0;
+
+    showAutoProgress("Analyse des stratégies", 0);
+    await nextFrame();
+
+    for (const strategy of strategies) {
+
+      done++;
+      showAutoProgress(
+        `Test : ${strategy.name}`,
+        Math.round((done / total) * 100)
+      );
+
+      const result = await autoImplantationParBlocs_2Phases(strategy);
+      if (!result?.ok && result?.ok !== undefined) continue;
+
+      const assign = assignReferencesToEmplacements();
+      if (!assign.feasible) continue;
+
+      const temps = computeTotalTime(
+        l => {
+          const empId = assign.refToEmp[l.article];
+          return empId ? empFromId(empId) : null;
+        },
+        T
+      );
+
+      // ✅ abandon précoce = PERF
+      if (bestTime < Infinity && temps > bestTime * 1.05) continue;
+
+      if (temps < bestTime) {
+        bestTime = temps;
+        bestSnapshot = snapshotImplantation();
+        bestName = strategy.name;
+      }
+
+      await nextFrame();
+    }
+
+    if (bestSnapshot) {
+      restoreImplantation(bestSnapshot);
+    }
+
+    IMPLANTATION_ACTIVE = true;
+    rebuildEmpIndex();
+    rebuildEmplCountByFam();
+    drawZonePlan();
+    computeAideImplantation();
+
+    hideAutoProgress();
+
+    alert(
+      `✅ Implantation retenue\n` +
+      `Stratégie : ${bestName}\n` +
+      `Temps : ${(bestTime / 3600).toFixed(2)} h`
+    );
+
+  } finally {
+    AUTO_IMPLANT_RUNNING = false;
+  }
+}

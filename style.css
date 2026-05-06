@@ -432,3 +432,80 @@ body.loading canvas {
 .prod-result.bad {
   color: #b71c1c; /* rouge foncé */
 }
+.btn-accent {
+  background: #4caf50;
+  color: #fff;
+  border: 1px solid #388e3c;
+}
+.btn-accent:hover {
+  background: #43a047;
+}
+.height-composition {
+  font-size: 13px;
+  color: #333;
+  margin-top: 6px;
+}
+/* ================= KPI COMPARAISON ================= */
+
+.kpi-dashboard {
+  background: #f8f9fb;
+  border-left: 5px solid #005fcc;
+}
+
+.kpi-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.kpi-subtitle {
+  margin: 4px 0 14px;
+  font-size: 13px;
+  color: #666;
+}
+
+.kpi-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.kpi-box {
+  background: white;
+  padding: 14px;
+  border-radius: 6px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.kpi-box.highlight {
+  background: #e9f2ff;
+  border: 1px solid #005fcc;
+}
+
+.kpi-label {
+  font-size: 12px;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.kpi-value {
+  font-size: 22px;
+  font-weight: bold;
+  color: #111;
+}
+
+.kpi-summary-text {
+  margin-top: 10px;
+  padding: 10px;
+  font-size: 13px;
+  background: #ffffff;
+  border-radius: 4px;
+  border-left: 4px solid #2e7d32;
+  color: #2e7d32;
+}
+.kpi-period {
+  margin: 6px 0 14px;
+  font-size: 13px;
+  color: #555;
+}
