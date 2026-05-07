@@ -53,6 +53,19 @@ let ACTIVE_FAMILLE = null;
 let AUTO_IMPLANT_RUNNING = false;
 let SELECTED = new Set();
 let INTERNAL_LEVEL_UPDATE = false;
+// =====================================================
+// AUTO‑IMPLANTATION — MODES & SÉCURITÉS (SAFE)
+// =====================================================
+
+// 🔑 Mode auto‑implantation ACTIF (piloté par l’UI)
+window.AUTO_IMPLANT_MODE = "FAST";
+// valeurs possibles : "FAST" | "PRECISE"
+
+// 🔒 Garde‑fous calcul
+const AUTO_IMPLANT_LIMITS = {
+  FAST:    { maxRefs: 200, maxIter: 300 },
+  PRECISE: { maxRefs: 400, maxIter: 800 }
+};
 
 /* =========================
    RÈGLES MÉTIER
@@ -62,7 +75,7 @@ let INTERNAL_LEVEL_UPDATE = false;
 const TEMPS_SEQUENCEUR = 18; // s : séquenceur <-> entrée NEF2
 const SHOW_VERTICAL_VALIDATION = false;
 const DEBUG_TIMES = true;
-
+const ENABLE_OPTIMISATION_GLOBALE = true;
 // ✅ seuil utilisé ailleurs → on le garde
 const SEUIL_MIN_P80 = 2;
 const SURFACE_PAR_EMPLACEMENT = 0.96; // m² (80 x 120 cm)
@@ -234,12 +247,24 @@ const HAUTEUR_MAX = {
   "N_09":"J","N_10":"I","N_11":"I","N_12":"I","N_13":"H","N_14":"H","N_15":"H","N_16":"H"
 };
 
+/*
+  Niveau MINIMUM physique par travée
+  (ex: travée 2 au‑dessus de l’allée → commence à E)
+*/
+const NIVEAU_MIN_TRAVEE = {
+  2: "E"
+};
+
 let ROW_INDEX = {};     // clé: allee|travee|position -> rowIndex
 let ROWS_TOTAL = 0;    // nombre réel de lignes écran
 
 /* =========================
    FONCTIONS CANONIQUES
 ========================= */
+function getNiveauMin(allee, travee) {
+  // priorité à la règle par travée
+  return NIVEAU_MIN_TRAVEE[travee] || "A";
+}
 
 function isPositionValide(travee, position) {
   if (TRAVEE_POSITIONS[travee]) {
@@ -252,13 +277,22 @@ function isNiveauValide(allee, travee, niveau) {
   const key = `${allee}_${String(travee).padStart(2, "0")}`;
 
   const maxNiveau = IMPLANTATION_ACTIVE
-    ? getHauteurReimplant(allee, travee)   // ✅ APRÈS
-    : HAUTEUR_MAX[key];                    // ✅ AVANT
+    ? getHauteurReimplant(allee, travee)
+    : HAUTEUR_MAX[key];
 
   if (!maxNiveau) return false;
 
+  const minNiveau = getNiveauMin(allee, travee);
+
+  // ✅ borne basse (ex: travée 2 commence à E)
+  if (niveau.charCodeAt(0) < minNiveau.charCodeAt(0)) {
+    return false;
+  }
+
+  // ✅ borne haute (logique existante)
   return niveau.charCodeAt(0) <= maxNiveau.charCodeAt(0);
 }
+
 function isZonePicking(e) {
   if (!e) return false;
 
@@ -292,6 +326,39 @@ function emplacementExiste(allee, travee, position, niveau) {
     isNiveauValide(allee, travee, niveau)
   );
 }
+function implanterColonneManuelle(e, famille) {
+  if (!e) return;
+
+  const { allee, travee, position } = e;
+
+  // ✅ niveau minimum physique réel (ex: E pour travée 2)
+  const niveauMin = getNiveauMin(allee, travee);
+
+  // ✅ niveau maximum réel
+  const niveauMax =
+    getHauteurReimplant(allee, travee) ||
+    HAUTEUR_MAX[`${allee}_${String(travee).padStart(2, "0")}`];
+
+  if (!niveauMax) return;
+
+  const minCode = niveauMin.charCodeAt(0);
+  const maxCode = niveauMax.charCodeAt(0);
+
+  for (let code = minCode; code <= maxCode; code++) {
+    const niveau = String.fromCharCode(code);
+    const empId =
+      `${allee}${String(travee).padStart(2, "0")}${niveau}${position}`;
+
+    const emp = EMPLACEMENTS[empId];
+    if (!emp) continue;
+    if (!isZonePicking(emp)) continue;
+    if (isZoneInterdite(emp)) continue;
+
+    // ✅ pose OU effacement
+    emp.famille = famille === null ? null : famille;
+  }
+}
+
 function getHauteurReimplant(allee, travee) {
   const key = `${allee}_${String(travee).padStart(2, "0")}`;
   const base = HAUTEUR_MAX[key];
@@ -1379,6 +1446,70 @@ total += costEloignementAllee(
   // Marge finale
   return total * (1 + T.MARGE);
 }
+function computeGlobalCost(state, T) {
+
+  applyStateToEmplacements(state);
+
+  const temps = computeTotalTime(
+    l => empFromId(l.empId),
+    T
+  );
+
+  const pen = computePenaliteSousDimensionnement();
+
+  return temps + pen;
+}
+function randomNeighbor(state) {
+
+  const keys = Object.keys(state);
+  if (keys.length < 2) return state;
+
+  const k1 = keys[Math.floor(Math.random() * keys.length)];
+  const k2 = keys[Math.floor(Math.random() * keys.length)];
+
+  if (k1 === k2) return state;
+
+  // swap familles
+  const tmp = state[k1];
+  state[k1] = state[k2];
+  state[k2] = tmp;
+
+  return state;
+}
+
+function anneal(initialState, T) {
+
+  let state = { ...initialState };
+  let best = { ...initialState };
+
+  let cost = computeGlobalCost(state, T);
+  let bestCost = cost;
+
+  let temperature = 1.0;
+
+  for (let i = 0; i < 5000; i++) {
+
+    const candidate = { ...state };
+    randomNeighbor(candidate);
+
+    const candidateCost = computeGlobalCost(candidate, T);
+    const delta = candidateCost - cost;
+
+    if (delta < 0 || Math.random() < Math.exp(-delta / temperature)) {
+      state = candidate;
+      cost = candidateCost;
+
+      if (cost < bestCost) {
+        best = { ...state };
+        bestCost = cost;
+      }
+    }
+
+    temperature *= 0.999;
+  }
+
+  return best;
+}
 
 console.log("✅ BLOC G chargé");
 /************************************************
@@ -1870,7 +2001,15 @@ function empMatchesFamille(empId, famille) {
   if (!famille) return true;
   return EMPLACEMENTS[empId]?.famille === famille;
 }
-
+/**
+ * ✅ Niveau fantôme visuel
+ * - utilisé UNIQUEMENT pour l’affichage
+ * - jamais physique, jamais cliquable
+ */
+function isGhostNiveauVisuel(allee, travee, niveau) {
+  const minNiv = getNiveauMin(allee, travee);
+  return niveau.charCodeAt(0) < minNiv.charCodeAt(0);
+}
 /**
  * Dessine le plan d’implantation
  */
@@ -1971,10 +2110,25 @@ cheminRows.forEach(row => {
         const empId = `${allee}${String(tr).padStart(2, "0")}${niveau}${pos}`;
         const e = EMPLACEMENTS[empId];
 
+// ===== DONNÉES FAMILLE VISUELLE =====
+let famille = e?.famille || null;
+let isGhost = false;
+
+// 🔮 CAS FANTÔME : niveau < niveau min, mais colonne réelle existe
+if (!e && isGhostNiveauVisuel(allee, tr, niveau)) {
+  const niveauMin = getNiveauMin(allee, tr);
+  const empIdMin =
+    `${allee}${String(tr).padStart(2, "0")}${niveauMin}${pos}`;
+
+  const base = EMPLACEMENTS[empIdMin];
+  if (base?.famille) {
+    famille = base.famille;
+    isGhost = true;
+  }
+}
         const x = VIEW.offsetX + ai * VIEW.cellW;
         const y = VIEW.offsetY + row * VIEW.cellH;
 
-        const famille = e?.famille || null;
 const zoneInterdite = isZoneInterdite(e);
 const filteredOut = !empMatchesFamille(empId, FILTERS.famille);
 
@@ -1982,16 +2136,29 @@ const filteredOut = !empMatchesFamille(empId, FILTERS.famille);
 if (zoneInterdite) {
   ctx.fillStyle = "#cfcfcf"; // gris interdit
 } else {
-  ctx.fillStyle = filteredOut ? "#ffffff" : colorByFamille(famille);
+  ctx.save();
+
+if (isGhost) {
+  ctx.globalAlpha = 0.25; // 👻 TRANSPARENCE FANTÔME
 }
 
-ctx.fillRect(x + 1, y + 1, VIEW.cellW - 2, VIEW.cellH - 2);
+ctx.fillStyle = filteredOut ? "#ffffff" : colorByFamille(famille);
+ctx.fillRect(
+  x + 1,
+  y + 1,
+  VIEW.cellW - 2,
+  VIEW.cellH - 2
+);
+
+ctx.restore();
+}
 
 /* ===== VALIDATION MÉTIER (VERTICAL) ===== */
 if (
   SHOW_VERTICAL_VALIDATION &&
   VALIDATION_VERTICAL_CACHE &&
-  VALIDATION_VERTICAL_CACHE[empId]
+  VALIDATION_VERTICAL_CACHE[empId] &&
+  !isGhost
 ) {
   const v = VALIDATION_VERTICAL_CACHE[empId];
 
@@ -2043,7 +2210,7 @@ if (zoneInterdite) {
         }
 
         /* ===== TEXTE FAMILLE ===== */
-        if (famille && !filteredOut) {
+        if (famille && !filteredOut && !isGhost) {
           ctx.fillStyle = "#000";
           ctx.font = "bold 10px Arial";
           ctx.textAlign = "center";
@@ -2143,7 +2310,6 @@ function updateAutDetails() {
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC J — INTERACTION PLAN (FAMILLE ONLY)
- * ✅ Basé UNIQUEMENT sur ROW_INDEX + EMP_INDEX
  ************************************************/
 
 let DRAG_START = null;
@@ -2161,18 +2327,17 @@ function selectRectangle(c1, c2, additive) {
   const maxR = Math.max(c1.row, c2.row);
 
   for (let ai = minA; ai <= maxA; ai++) {
-  for (let r = minR; r <= maxR; r++) {
+    for (let r = minR; r <= maxR; r++) {
+      const key = `${NIV_REIMPLANT}|${ai}|${r}`;
+      const empId = EMP_INDEX.get(key);
+      if (!empId) continue;
 
-    const key = `${NIV_REIMPLANT}|${ai}|${r}`;
-    const empId = EMP_INDEX.get(key);
-    if (!empId) continue;
+      const e = EMPLACEMENTS[empId];
+      if (isZoneInterdite(e)) continue;
 
-    const e = EMPLACEMENTS[empId];
-    if (isZoneInterdite(e)) continue; // 🚫 IGNORÉ
-
-    SELECTED.add(empId);
+      SELECTED.add(empId);
+    }
   }
-}
 }
 
 /**
@@ -2197,7 +2362,7 @@ function bindPlanInteractionOnce() {
     DRAG_IN_PROGRESS = false;
   });
 
-  /* ===== FIN DRAG → SÉLECTION RECTANGLE ===== */
+  /* ===== FIN DRAG ===== */
   canvas.addEventListener("mouseup", ev => {
     if (!DRAG_START) return;
 
@@ -2218,7 +2383,7 @@ function bindPlanInteractionOnce() {
   canvas.addEventListener("click", ev => {
     if (DRAG_IN_PROGRESS) {
       DRAG_IN_PROGRESS = false;
-      return; // évite clic fantôme après drag
+      return;
     }
 
     const empId = getEmpIdFromMouse(canvas, ev);
@@ -2245,51 +2410,33 @@ function bindPlanInteractionOnce() {
 
   /* ===== APPLIQUER FAMILLE ===== */
   document.getElementById("btnApply")?.addEventListener("click", () => {
-    if (SELECTED.size === 0) {
-      alert("Sélectionne au moins une case.");
-      return;
-    }
+  if (SELECTED.size === 0) {
+    alert("Sélectionne au moins une case.");
+    return;
+  }
 
-    IMPLANTATION_ACTIVE = true;
+  SELECTED.forEach(empId => {
 
-    const niveauSource = FILTERS.niveau;
-    const niveauxCibles = getExistingLevels();
+    // ✅ Parse même si l’emplacement n’existe pas physiquement
+    const m = empId.match(/^([A-Z])(\d{2})([A-Z])(\d)$/);
+    if (!m) return;
 
-    // 1️⃣ Pose sur le niveau courant
-    SELECTED.forEach(empId => {
-      if (EMPLACEMENTS[empId]) {
-        EMPLACEMENTS[empId].famille = ACTIVE_FAMILLE;
-      }
-    });
+    const e = {
+      allee: m[1],
+      travee: parseInt(m[2], 10),
+      niveau: m[3],      // peut être A/B/C/D
+      position: parseInt(m[4], 10)
+    };
 
-    // 2️⃣ Duplication verticale STRICTE
-    niveauxCibles.forEach(niveau => {
-      if (niveau === niveauSource) return;
-
-      ensureFullLevel(niveau);
-
-      SELECTED.forEach(empIdSource => {
-        const src = EMPLACEMENTS[empIdSource];
-        if (!src) return;
-
-        const empIdTarget =
-          `${src.allee}${String(src.travee).padStart(2, "0")}${niveau}${src.position}`;
-
-        const tgt = EMPLACEMENTS[empIdTarget];
-        if (tgt) tgt.famille = ACTIVE_FAMILLE;
-      });
-    });
-
-    SELECTED.clear();
-
-IMPLANTATION_ACTIVE = true;      // ✅ VALIDATION
-rebuildEmplCountByFam();        // ✅ SYNC MÉTIER
-computeAideImplantation();      // ✅ MAJ AIDE
-
-drawZonePlan();
+    implanterColonneManuelle(e, ACTIVE_FAMILLE);
   });
 
-  console.log("✅ Interaction plan bindée (ROW_INDEX only)");
+  SELECTED.clear();
+  IMPLANTATION_ACTIVE = true;
+  rebuildEmplCountByFam();
+  computeAideImplantation();
+  drawZonePlan();
+});
 }
 console.log("✅ BLOC J chargé");
 
@@ -2297,7 +2444,31 @@ console.log("✅ BLOC J chargé");
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC K — UI (FAMILLE & NIVEAUX)
  ************************************************/
+// =====================================================
+// UI — Sélecteur mode FAST / PRECISE
+// =====================================================
+function bindAutoImplantModeSelector() {
+  const sel = document.getElementById("autoImplantMode");
+  if (!sel) return;
 
+  // valeur initiale
+  sel.value = window.AUTO_IMPLANT_MODE || "FAST";
+
+  sel.addEventListener("change", () => {
+  if (sel.value === "PRECISE" && !IMPLANTATION_ACTIVE) {
+    alert(
+      "⚠️ Le mode PRECISE nécessite une implantation automatique.\n" +
+      "Lance d’abord l’implantation par blocs."
+    );
+    sel.value = "FAST";
+    window.AUTO_IMPLANT_MODE = "FAST";
+    return;
+  }
+
+  window.AUTO_IMPLANT_MODE = sel.value;
+  console.log("🔧 Mode auto‑implantation =", window.AUTO_IMPLANT_MODE);
+});
+}
 /* =========================
    FILTRE NIVEAU
 ========================= */
@@ -2456,63 +2627,35 @@ function bindUIOnce() {
  ************************************************/
 function rebuildLevelsAfterHeightChange() {
 
-  /* =====================================================
-     1️⃣ Créer tous les emplacements PHYSIQUES APRÈS Δ
-        🔑 AUCUNE SUPPRESSION
-  ===================================================== */
-
   ALLEES.split("").forEach(allee => {
     for (let tr = TRAVEE_MIN; tr <= TRAVEE_MAX; tr++) {
       const maxNiv = getHauteurReimplant(allee, tr);
       if (!maxNiv) continue;
 
-      for (let n = "A"; n <= maxNiv; n = String.fromCharCode(n.charCodeAt(0) + 1)) {
-       }
+      for (
+        let n = "A";
+        n <= maxNiv;
+        n = String.fromCharCode(n.charCodeAt(0) + 1)
+      ) {
+        // volontairement vide (création différée)
+      }
     }
   });
 
-  /* =====================================================
-     2️⃣ Liste des niveaux désormais existants
-  ===================================================== */
-
   const niveaux = getExistingLevels();
-
-  /* =====================================================
-     3️⃣ Niveau courant garanti valide
-  ===================================================== */
 
   if (!niveaux.includes(NIV_REIMPLANT)) {
     NIV_REIMPLANT = niveaux[0] || "";
   }
 
-  /* =====================================================
-     4️⃣ Synchronisation UI (filtre niveau)
-  ===================================================== */
-
-  const levelSel = document.getElementById("levelSelect");
-  if (levelSel) {
-    levelSel.innerHTML = "";
-    niveaux.forEach(n => {
-      const opt = document.createElement("option");
-      opt.value = n;
-      opt.textContent = `Niveau ${n}`;
-      levelSel.appendChild(opt);
-    });
-    levelSel.value = NIV_REIMPLANT;
-  }
-
-  /* =====================================================
-     5️⃣ Rebuild graphique & indices (NON DESTRUCTIF)
-  ===================================================== */
-
   rebuildEmpIndex();
   resizeImplantationCanvas();
   drawZonePlan();
   computeAideImplantation();
-  updateReimpHeightInfo();
 
   console.log("✅ Niveaux ajoutés — implantation conservée");
 }
+
 function openTab(tabId, btn) {
   document.querySelectorAll(".tab-content")
     .forEach(div => div.classList.remove("active"));
@@ -2567,10 +2710,12 @@ function initUI() {
   fillFamilleFilter();
   initFamillePalette();
   bindUIOnce();
+  bindAutoImplantModeSelector(); // ✅ ICI
   updateToolbarInfo();
   initHeightEditor();
-  console.log("✅ initUI OK");
 }
+console.log("✅ initUI OK");
+
 
 console.log("✅ BLOC K chargé");
 
@@ -3436,6 +3581,7 @@ drawHeatmapAvant(); // ✅ SURIMPRESSION
     console.error(e);
     alert("Erreur simulation");
   } finally {
+AUTO_IMPLANT_RUNNING = false;
     hideLoader();
   }
 }
@@ -3672,6 +3818,29 @@ rows.forEach(r => {
     </table>
   `;
 }
+function computePenaliteSousDimensionnement() {
+
+  const cible = window.__BESOIN_CIBLE_PAR_FAM || {};
+  const poses = {};
+
+  Object.values(EMPLACEMENTS).forEach(e => {
+    if (!isZonePicking(e)) return;
+    if (!e.famille) return;
+
+    poses[e.famille] = (poses[e.famille] || 0) + 1;
+  });
+
+  let penalty = 0;
+
+  Object.keys(cible).forEach(fam => {
+    const manque = Math.max(0, cible[fam] - (poses[fam] || 0));
+    if (manque > 0) {
+      penalty += manque * 1e6; // 🔴 pénalité HARD
+    }
+  });
+
+  return penalty;
+}
 
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
@@ -3735,6 +3904,32 @@ function buildPhysicalColumns() {
   );
 
   return Object.values(colonnes);
+}
+function extractStateFromEmplacements() {
+  const state = {};
+
+  Object.values(EMPLACEMENTS).forEach(e => {
+    if (!isZonePicking(e)) return;
+    if (isZoneInterdite(e)) return;
+
+    const key = `${e.allee}|${e.travee}|${e.position}`;
+    state[key] = e.famille;
+  });
+
+  return state;
+}
+function applyStateToEmplacements(state) {
+
+  Object.values(EMPLACEMENTS).forEach(e => {
+    if (!isZonePicking(e)) return;
+    if (isZoneInterdite(e)) return;
+
+    const key = `${e.allee}|${e.travee}|${e.position}`;
+
+    if (state[key] !== undefined) {
+      e.famille = state[key];
+    }
+  });
 }
 
 function poserColonneDuBasVersLeHaut(colonne, famille) {
@@ -3887,6 +4082,40 @@ function buildZonesByFamille() {
 
   return zones;
 }
+// =====================================================
+// PICKING — SÉLECTION RÉFÉRENCES CRITIQUES
+// =====================================================
+function selectCriticalRefs(refUsage, maxRefs) {
+  return Object.entries(refUsage)
+    .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+    .slice(0, maxRefs)
+    .map(([ref]) => ref);
+}
+// =====================================================
+// PICKING — MICRO SWAP LOCAL (DELTA O(1))
+// =====================================================
+function tryLocalPickingSwap(refA, refB, refToEmp, refUsage, T) {
+  const empA = EMPLACEMENTS[refToEmp[refA]];
+  const empB = EMPLACEMENTS[refToEmp[refB]];
+  if (!empA || !empB) return false;
+
+  const before =
+    computeFastPickingScore(empA, refUsage[refA] || 1, T) +
+    computeFastPickingScore(empB, refUsage[refB] || 1, T);
+
+  const after =
+    computeFastPickingScore(empB, refUsage[refA] || 1, T) +
+    computeFastPickingScore(empA, refUsage[refB] || 1, T);
+
+  if (after < before) {
+    const tmp = refToEmp[refA];
+    refToEmp[refA] = refToEmp[refB];
+    refToEmp[refB] = tmp;
+    return true;
+  }
+  return false;
+}
+
 function groupRefsByFamille(refUsage) {
   const refsByFam = {};
 
@@ -3940,7 +4169,41 @@ function computeEmplacementEfficiencyScore(emp, T) {
 
   return Wz * costVertical + Wh * costHorizontal + Wa * costAllee;
 }
+// =====================================================
+// PICKING — SCORE PROXY RAPIDE (SANS SIMULATION)
+// =====================================================
+function computeFastPickingScore(emp, freq, T) {
+  if (!emp) return Infinity;
+  return freq * (
+    computeVerticalTime(emp, T) +
+    distanceHorizontale(ENTRY_POINT, emp, T) +
+    costEloignementAllee(emp)
+  );
+}
+// =====================================================
+// PICKING — MICRO‑OPTIMISATION BORNÉE (SAFE)
+// =====================================================
+function microOptimizePickingAssignments(refToEmp, mode) {
+  const limits = AUTO_IMPLANT_LIMITS[mode];
+  if (!limits) return;
 
+  const T = {
+    X: +tX.value,
+    Zup: +tZup.value,
+    Zdown: +tZdown.value
+  };
+
+  const refUsage = computeRefUsage();
+  const refs = selectCriticalRefs(refUsage, limits.maxRefs);
+
+  for (let i = 0; i < limits.maxIter; i++) {
+    const a = refs[Math.random() * refs.length | 0];
+    const b = refs[Math.random() * refs.length | 0];
+    if (a && b && a !== b) {
+      tryLocalPickingSwap(a, b, refToEmp, refUsage, T);
+    }
+  }
+}
 /**
  * Affectation réaliste des références APRÈS implantation
  */
@@ -4088,7 +4351,7 @@ function computeExecutiveSummary({
     heuresParJour * coutHoraireETP;
 
   const economieParAn =
-    economieParJour * 365;
+    economieParJour * 250;
 
   return {
     minDate,
@@ -4131,6 +4394,16 @@ if (!IMPLANTATION_ACTIVE) {
   };
 
  const assign = assignReferencesToEmplacements();
+// =====================================================
+// ✅ MICRO‑OPTIMISATION PICKING (OPTIONNELLE)
+// =====================================================
+if (AUTO_IMPLANT_MODE === "PRECISE" && assign?.refToEmp) {
+  console.log("⚙️ Micro‑optimisation picking (mode PRECISE)");
+  microOptimizePickingAssignments(
+    assign.refToEmp,
+    AUTO_IMPLANT_MODE
+  );
+}
   if (!assign || !assign.refToEmp) {
     out.innerHTML = "<b>Comparaison impossible</b>";
     return;
@@ -4154,6 +4427,9 @@ const tempsApres = computeTotalTime(
   },
   T
 );
+// ✅ RENDRE ACCESSIBLE À L’EXPORT
+window.__TEMPS_AVANT = tempsAvant;
+window.__TEMPS_APRES = tempsApres;
 // ✅ Gain absolu et pourcentage
 const gainSecondes = tempsAvant - tempsApres;
 const pct = tempsAvant > 0
@@ -4230,6 +4506,10 @@ const spaceApres = computeSpaceSnapshotApres(
   EMPLACEMENTS,
   STOCK_BY_EMP
 );
+
+// ✅ RENDRE ACCESSIBLE À L’EXPORT (PDF / Excel)
+window.__SPACE_AVANT = spaceAvant;
+window.__SPACE_APRES = spaceApres;
 
 const deltaEmpl = spaceApres.total - spaceAvant.total;
 const deltaSurface = spaceApres.surfaceTotal - spaceAvant.surfaceTotal;
@@ -4536,20 +4816,36 @@ function buildAutoImplantationContext() {
 
   return { colonnes, empIndex };
 }
-async function autoImplantationParBlocs_2Phases(strategy) {
+async function autoImplantationParBlocs_2Phases(strategy, options = {}) {
+
+const MODE = window.AUTO_IMPLANT_MODE || "FAST";
+
+if (MODE === "FAST") {
+  options.fastPlacement = true;
+} else {
+  options.fastPlacement = false;
+}
+
+  const silent = options.silent === true;
 
   if (!strategy || !strategy.weights) {
-  console.error("Stratégie invalide", strategy);
-  return { ok: false, reason: "invalid-strategy" };
-}
+    console.error("Stratégie invalide", strategy);
+    return { ok: false, reason: "invalid-strategy" };
+  }
 
   console.log("▶ autoImplantationParBlocs_2Phases appelée", strategy.name);
 
-// ✅ Sécurité : synchroniser le niveau courant avant auto
-const niveaux = getExistingLevels();
-if (!niveaux.includes(NIV_REIMPLANT)) {
-  NIV_REIMPLANT = niveaux[0];
-}
+// ==============================================
+// MODE AUTO‑IMPLANTATION (FAST / PRECISE)
+// ==============================================
+const MODE_AUTO = window.AUTO_IMPLANT_MODE || "FAST";
+const IS_PRECISE = MODE_AUTO === "PRECISE";
+
+  // ✅ Sécurité : synchroniser le niveau courant avant auto
+  const niveaux = getExistingLevels();
+  if (!niveaux.includes(NIV_REIMPLANT)) {
+    NIV_REIMPLANT = niveaux[0];
+  }
 
   /* =====================================================
      PHASE 0 — RESET
@@ -4653,8 +4949,28 @@ Object.keys(cibleEmpl).forEach(fam => {
     Math.ceil(cibleEmpl[fam] / capBloc)
   );
 });
-// ✅ blocs les PLUS RAPIDES d'abord
-blocs.sort((a, b) => b.speedScore - a.speedScore);
+// ✅ Tri des blocs selon le mode
+if (!IS_PRECISE) {
+  // FAST : tri simple, ultra rapide
+  blocs.sort((a, b) => b.speedScore - a.speedScore);
+} else {
+  // PRECISE : pondération vitesse + importance famille
+  blocs.sort((a, b) =>
+    (b.speedScore * 1.2 + (importance[b.fam] || 0)) -
+    (a.speedScore * 1.2 + (importance[a.fam] || 0))
+  );
+}
+// ==============================================
+// GARDE‑FOU TEMPS — MODE PRECISE
+// ==============================================
+if (IS_PRECISE) {
+  const MAX_BLOCS = 200;
+  if (blocs.length > MAX_BLOCS) {
+    blocs.length = MAX_BLOCS;
+    console.warn("⚠️ PRECISE limité à", MAX_BLOCS, "blocs");
+  }
+}
+
   /* =====================================================
      PHASE 6 — ATTRIBUTION BLOCS MINIMUM
   ===================================================== */
@@ -4783,7 +5099,19 @@ function choisirFamille(
     const surplusScore =
       surplusQuota[fam] > 0 ? surplusRestant / surplusQuota[fam] : 0;
 
-    const score = ALPHA * besoinScore + BETA * surplusScore;
+    const GAMMA = 1.5; // 🔑 pénalisation sous-dimensionnement
+
+const manque = Math.max(0, cibleEmpl[fam] - (posesParFam[fam] || 0));
+
+const underScore =
+  cibleEmpl[fam] > 0
+    ? manque / cibleEmpl[fam]
+    : 0;
+
+const score =
+  ALPHA * besoinScore +
+  BETA  * surplusScore +
+  GAMMA * underScore;
 
     if (score > bestScore) {
       bestScore = score;
@@ -4883,38 +5211,20 @@ for (const colonne of colonnesValides) {
   ========================================= */
   doneBlocs++;
 
-showAutoProgress(
-  `Implantation automatique : ${strategy.name}`,
-  Math.round((doneBlocs / totalBlocs) * 100)
-);
-
 // ✅ laisse respirer le browser
 await nextFrame();
-
-/* =====================================================
-   GARANTIE ANTI-TROUS – FIN D'AUTO-IMPLANTATION
-===================================================== */
-
-Object.values(EMPLACEMENTS).forEach(e => {
-  if (!isZonePicking(e)) return;
-  if (isZoneInterdite(e)) return; // 🚫 PAS DE AUT AUTO
-
-  if (e.famille === null) {
-    e.famille = "AUT";
-  }
-});
-
+}
 /* =====================================================
    FINALISATION
 ===================================================== */
 
 IMPLANTATION_ACTIVE = true;
+
 rebuildEmpIndex();
-drawZonePlan();
 rebuildEmplCountByFam();
 computeAideImplantation();
+drawZonePlan();
 }
-
 /************************************************
  * SIMULATION PICKING — VERSION PROPRE
  * BLOC N — DUPLICATION FAMILLE (PROPRE)
@@ -4948,9 +5258,6 @@ function duplicateLevelFamille(sourceLevel, targetLevels, mode = "overwrite") {
   drawZonePlan();
   rebuildEmplCountByFam();
   computeAideImplantation();
-}
-
-  return { ok: true };
 }
 
 /* =========================
@@ -5025,8 +5332,19 @@ function restoreImplantation(snapshot) {
 }
 async function autoImplantationParImportance() {
 
-  if (AUTO_IMPLANT_RUNNING) return;
+  console.log("🟢 CLICK autoImplantation");
+
+  if (AUTO_IMPLANT_RUNNING) {
+    console.warn("⛔ Auto‑implantation déjà en cours");
+    return;
+  }
   AUTO_IMPLANT_RUNNING = true;
+
+  // ✅ Affichage du loader AVANT tout calcul
+  showLoader();
+  await nextFrame();
+
+  const startTime = performance.now();
 
   try {
     const strategies = buildImportanceStrategies();
@@ -5035,6 +5353,7 @@ async function autoImplantationParImportance() {
     let bestSnapshot = null;
     let bestName = "";
 
+    // ✅ Paramètres temps (définis UNE SEULE FOIS)
     const T = {
       X: +tX.value,
       Zup: +tZup.value,
@@ -5050,24 +5369,38 @@ async function autoImplantationParImportance() {
     const total = strategies.length;
     let done = 0;
 
-    showAutoProgress("Analyse des stratégies", 0);
+    setLoaderProgress(0, "Auto‑implantation en cours…");
     await nextFrame();
+
+    /* =====================================================
+       BOUCLE STRATÉGIES (SANS OPTIMISATION GLOBALE)
+    ===================================================== */
 
     for (const strategy of strategies) {
 
+      const result = await autoImplantationParBlocs_2Phases(
+        strategy,
+        { silent: true }
+      );
+      if (result?.ok === false) continue;
+
       done++;
-      showAutoProgress(
-        `Test : ${strategy.name}`,
-        Math.round((done / total) * 100)
+
+      // ⏱ temps réel
+      const elapsedSec = Math.round(
+        (performance.now() - startTime) / 1000
       );
 
-      const result = await autoImplantationParBlocs_2Phases(strategy);
-      if (!result?.ok && result?.ok !== undefined) continue;
+      const avgPerStrategy = elapsedSec / done;
+      const remainingSec = Math.round(
+        avgPerStrategy * (total - done)
+      );
 
+      // 🧮 temps métier
       const assign = assignReferencesToEmplacements();
       if (!assign.feasible) continue;
 
-      const temps = computeTotalTime(
+      const tempsPrep = computeTotalTime(
         l => {
           const empId = assign.refToEmp[l.article];
           return empId ? empFromId(empId) : null;
@@ -5075,21 +5408,64 @@ async function autoImplantationParImportance() {
         T
       );
 
-      // ✅ abandon précoce = PERF
-      if (bestTime < Infinity && temps > bestTime * 1.05) continue;
+      // ✅ UI (loader uniquement)     
+const pct = Math.min(95, Math.round((done / total) * 100));
+setLoaderProgress(
+  pct,
+        `⏱ Auto‑implantation : ${elapsedSec}s écoulées — ~${remainingSec}s restantes
+🧮 Temps de préparation : ${(tempsPrep / 3600).toFixed(2)} h`
+      );
 
-      if (temps < bestTime) {
-        bestTime = temps;
+      await nextFrame();
+
+      // ✅ sélection du meilleur
+      if (bestTime < Infinity && tempsPrep > bestTime * 1.05) continue;
+
+      if (tempsPrep < bestTime) {
+        bestTime = tempsPrep;
         bestSnapshot = snapshotImplantation();
         bestName = strategy.name;
       }
-
-      await nextFrame();
     }
 
-    if (bestSnapshot) {
-      restoreImplantation(bestSnapshot);
+    /* =====================================================
+       RESTAURATION MEILLEURE IMPLANTATION
+    ===================================================== */
+
+    if (!bestSnapshot) {
+      throw new Error("Aucune implantation valide trouvée");
     }
+
+    restoreImplantation(bestSnapshot);
+
+    /* =====================================================
+       ✅ OPTIMISATION GLOBALE — UNE SEULE FOIS
+    ===================================================== */
+
+    if (ENABLE_OPTIMISATION_GLOBALE) {
+
+      setLoaderProgress(95, "Optimisation globale finale…");
+
+      const state0 = extractStateFromEmplacements();
+
+      if (!state0 || !Object.keys(state0).length) {
+        throw new Error("state0 vide — optimisation impossible");
+      }
+
+      console.time("anneal");
+      const bestAnnealed = anneal(state0, T);
+      console.timeEnd("anneal");
+
+      if (!bestAnnealed) {
+        throw new Error("anneal() a retourné un état invalide");
+      }
+
+      applyStateToEmplacements(bestAnnealed);
+    }
+
+    /* =====================================================
+       FINALISATION
+    ===================================================== */
 
     IMPLANTATION_ACTIVE = true;
     rebuildEmpIndex();
@@ -5097,15 +5473,160 @@ async function autoImplantationParImportance() {
     drawZonePlan();
     computeAideImplantation();
 
-    hideAutoProgress();
+    const totalSec = ((performance.now() - startTime) / 1000).toFixed(1);
+
+    hideLoader();
 
     alert(
-      `✅ Implantation retenue\n` +
-      `Stratégie : ${bestName}\n` +
-      `Temps : ${(bestTime / 3600).toFixed(2)} h`
+      `✅ Auto‑implantation terminée\n` +
+      `Stratégie retenue : ${bestName}\n` +
+      `🧮 Temps préparation : ${(bestTime / 3600).toFixed(2)} h\n` +
+      `⏱ Temps de calcul : ${totalSec} s`
     );
 
+  } catch (err) {
+    console.error("💥 CRASH autoImplantationParImportance", err);
+    hideLoader();
+    alert("❌ Erreur pendant l’auto‑implantation.\nVoir console.");
   } finally {
     AUTO_IMPLANT_RUNNING = false;
   }
 }
+async function exportComparisonPDF() {
+
+  // 🔒 garde‑fou
+  if (
+    !window.__SPACE_AVANT ||
+    !window.__SPACE_APRES ||
+    !window.__TEMPS_AVANT ||
+    !window.__TEMPS_APRES
+  ) {
+    alert("Comparaison non disponible.");
+    return;
+  }
+
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF("p", "mm", "a4");
+
+  const pageW = pdf.internal.pageSize.getWidth();
+  const margin = 15;
+  let y = 20;
+
+  /* =========================
+     PAGE 1 — SYNTHÈSE
+  ========================= */
+
+  pdf.setFont("Helvetica", "bold");
+  pdf.setFontSize(16);
+  pdf.text("Comparaison Implantation AVANT / APRÈS", margin, y);
+  y += 10;
+
+  pdf.setFontSize(10);
+  pdf.setFont("Helvetica", "normal");
+  pdf.text(`Date : ${new Date().toLocaleDateString()}`, margin, y);
+  y += 10;
+
+  const tAvantH = (window.__TEMPS_AVANT / 3600).toFixed(2);
+  const tApresH = (window.__TEMPS_APRES / 3600).toFixed(2);
+  const gainH = (tAvantH - tApresH).toFixed(2);
+  const gainPct =
+    window.__TEMPS_AVANT > 0
+      ? ((window.__TEMPS_AVANT - window.__TEMPS_APRES) / window.__TEMPS_AVANT * 100).toFixed(1)
+      : "0";
+
+  const rows = [
+    ["Temps total", `${tAvantH} h`, `${tApresH} h`],
+    ["Gain de temps", `${gainH} h`, `${gainPct} %`],
+    ["Emplacements",
+      window.__SPACE_AVANT.total,
+      window.__SPACE_APRES.total
+    ],
+    ["Surface",
+      `${window.__SPACE_AVANT.surfaceTotal.toFixed(0)} m²`,
+      `${window.__SPACE_APRES.surfaceTotal.toFixed(0)} m²`
+    ]
+  ];
+
+  rows.forEach(r => {
+    pdf.text(r[0], margin, y);
+    pdf.text(String(r[1]), margin + 70, y);
+    pdf.text(String(r[2]), margin + 120, y);
+    y += 6;
+  });
+
+  /* =========================
+     PAGE 2 — PLAN
+  ========================= */
+
+  pdf.addPage();
+  pdf.setFont("Helvetica", "bold");
+  pdf.text("Plan de réimplantation", margin, 20);
+  document
+  .getElementById("tab-reimplantation")
+  ?.classList.add("active");
+  const canvas = document.getElementById("plan2D-reimplantation");
+  if (!canvas) {
+    alert("Canvas de réimplantation introuvable.");
+    return;
+  }
+
+  // ✅ export DIRECT du canvas (pas html2canvas)
+const rect = canvas.getBoundingClientRect();
+
+if (rect.width === 0 || rect.height === 0) {
+  alert("Plan non visible — active l’onglet Réimplantation avant export.");
+  return;
+}
+
+const imgData = canvas.toDataURL("image/png");
+
+const imgW = pageW - margin * 2;
+const imgH = rect.height * imgW / rect.width;
+
+  pdf.addImage(imgData, "JPEG", margin, 30, imgW, imgH);
+
+  /* =========================
+     PAGE 3 — FAMILLES
+  ========================= */
+
+  pdf.addPage();
+  pdf.text("Détail par famille", margin, 20);
+
+  let yFam = 30;
+  Object.entries(window.__BESOIN_CIBLE_PAR_FAM || {}).forEach(([fam, cible]) => {
+    const poses = EMPL_COUNT_BY_FAM[fam] || 0;
+    const manque = Math.max(0, cible - poses);
+    const statut = manque === 0 ? "OK" : "Sous‑dimensionné";
+
+    pdf.text(
+      `${fam} — Besoin:${cible} | Posés:${poses} | Manque:${manque} | ${statut}`,
+      margin,
+      yFam
+    );
+
+    yFam += 6;
+    if (yFam > 280) {
+      pdf.addPage();
+      yFam = 20;
+    }
+  });
+
+  pdf.save("Comparaison_Implantation.pdf");
+}
+function exportComparisonExcel() {
+  alert("Export Excel non implémenté (PDF OK).");
+}
+
+function exportReimplantationPlanImage() {
+  const canvas = document.getElementById("plan2D-reimplantation");
+  if (!canvas) {
+    alert("Canvas introuvable");
+    return;
+  }
+
+  const a = document.createElement("a");
+  a.href = canvas.toDataURL("image/png");
+  a.download = "Plan_Reimplantation.png";
+  a.click();
+}
+

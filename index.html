@@ -9,6 +9,10 @@
 
   <!-- ================= Librairie Excel ================= -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+<!-- === Export PDF === -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
 </head>
 
 <body>
@@ -165,7 +169,18 @@
   <button class="btn" id="btnApply">Appliquer au sélectionné</button>
   <button class="btn btn-secondary" id="btnClearSel">Vider sélection</button>
 
-  <button class="btn btn-primary" id="btnAutoImplantImportance">
+  <!-- === Mode optimisation auto‑implantation === -->
+<div style="margin-bottom:8px">
+  <label for="autoImplantMode">
+    <b>Qualité d’auto‑implantation</b>
+  </label>
+  <select id="autoImplantMode" style="margin-left:8px">
+    <option value="FAST">Rapide (structurelle)</option>
+    <option value="PRECISE">Précise (optimisation picking)</option>
+  </select>
+</div>
+
+<button class="btn btn-primary" id="btnAutoImplantImportance">
   Implantation automatique — répartition par blocs
 </button>
 
@@ -300,7 +315,19 @@
       <div class="kpi-value" id="kpiEcoYear">—</div>
     </div>
   </div>
+<div class="export-actions" style="margin-top:12px;">
+  <button class="btn btn-primary" onclick="exportComparisonPDF()">
+    📄 Export PDF
+  </button>
 
+  <button class="btn btn-secondary" onclick="exportComparisonExcel()">
+    📊 Export Excel
+  </button>
+
+  <button class="btn btn-secondary" onclick="exportReimplantationPlanImage()">
+    🖼 Export plan (PNG)
+  </button>
+</div>
   <!-- ===== Message de synthèse ===== -->
   <div class="kpi-summary-text" id="kpiSummaryText">
     —
