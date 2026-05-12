@@ -31,6 +31,10 @@ let DELTA_NIVEAUX_REIMPLANT = {}; // clé = "A_01" → { ETAGERE, LISSE }
 let MODE_AJOUT_NIVEAU = "LISSE"; // ou "ETAGERE
 let NIVEAU_TYPE = {};
 let IMPLANTATION_ACTIVE = false;
+let EMP_COL_STOCK = null;
+let ARTICLE_COL = null;
+let GEST_COL = null;
+let STOCK_QTE_COL = null;
 
 // 🔑 Initialisation canonique
 NIVEAUX_AUTORISES.split("").forEach(n => {
@@ -525,7 +529,15 @@ function detectColumn(row, keywords) {
   }
   return null;
 }
-
+function getStockColumn(row, keys) {
+  for (const k of Object.keys(row)) {
+    const norm = normalizeHeader(k);
+    if (keys.some(key => norm === key || norm.includes(key))) {
+      return k;
+    }
+  }
+  return null;
+}
 console.log("✅ BLOC B chargé (loader % intégré)");
 
 /************************************************
@@ -781,6 +793,33 @@ if (!emplacementExiste(
   );
 }
 /**
+ * Indexe les lignes STOCK par emplacement (empId)
+ * 🔑 SOURCE UNIQUE DE VÉRITÉ POUR LE STOCK
+ */
+function rebuildStockByEmpIndex() {
+  STOCK_BY_EMP = {};
+
+  STOCK_ROWS.forEach(row => {
+    const raw = row[EMP_COL_STOCK];
+    if (!raw) return;
+
+    const parsed = parseEmplacement(raw);
+    if (!parsed) return;
+
+    const empId = parsed.empId;
+
+    STOCK_BY_EMP[empId] ??= [];
+    STOCK_BY_EMP[empId].push(row);
+  });
+
+  console.log(
+    "✅ STOCK_BY_EMP reconstruit :",
+    Object.keys(STOCK_BY_EMP).length,
+    "emplacements stockés"
+  );
+}
+
+/**
  * Initialise les emplacements physiques depuis le fichier STOCK
  * (même logique que le DT, mais source différente)
  */
@@ -788,10 +827,8 @@ function initEmplacementsFromStock() {
   EMPLACEMENTS_STOCK = {};
 
   STOCK_ROWS.forEach(row => {
-    const raw =
-      row["Emplacement"] ||
-      row["Emplacement stock"] ||
-      row["EMPLACEMENT"];
+    const raw = row[EMP_COL_STOCK];
+    if (!raw) return;
 
     const parsed = parseEmplacement(raw);
     if (!parsed) return;
@@ -816,25 +853,7 @@ function initEmplacementsFromStock() {
     Object.keys(EMPLACEMENTS_STOCK).length
   );
 }
-function rebuildStockByEmpIndex() {
-  STOCK_BY_EMP = {};
 
-  STOCK_ROWS.forEach(row => {
-    const raw =
-      row["Emplacement"] ||
-      row["Emplacement stock"] ||
-      row["EMPLACEMENT"];
-
-    const parsed = parseEmplacement(raw);
-    if (!parsed) return;
-
-    const empId = parsed.empId;
-    STOCK_BY_EMP[empId] ??= [];
-    STOCK_BY_EMP[empId].push(row);
-  });
-
-  console.log("✅ STOCK_BY_EMP indexé :", Object.keys(STOCK_BY_EMP).length);
-}
 /**
  * Complète un niveau pour avoir TOUTES les cases :
  * - Allées A → N
@@ -2621,6 +2640,40 @@ function bindUIOnce() {
     drawZonePlan();
   }
 });
+// =====================================================
+// BOUTON AUTO‑IMPLANTATION — POINT D’ENTRÉE RÉEL
+// =====================================================
+document
+  .getElementById("btnAutoImplantImportance")
+  ?.addEventListener("click", async () => {
+
+    if (AUTO_IMPLANT_RUNNING) return;
+    AUTO_IMPLANT_RUNNING = true;
+
+    console.log(
+      "▶ Bouton auto‑implantation cliqué — mode =",
+      window.AUTO_IMPLANT_MODE
+    );
+
+    const strategies = buildImportanceStrategies();
+
+    // ✅ stratégie par défaut (équilibrée)
+    const strategy = strategies[1];
+
+    const res = await autoImplantationParBlocs_2Phases(strategy);
+
+    if (res?.ok !== false) {
+      IMPLANTATION_ACTIVE = true;
+
+      rebuildEmplCountByFam();
+      computeAideImplantation();
+      rebuildEmpIndex();
+      resizeImplantationCanvas();
+      drawZonePlan();
+    }
+
+    AUTO_IMPLANT_RUNNING = false;
+  });
 }
 /************************************************
  * UI — Gestion des onglets
@@ -2661,11 +2714,6 @@ function openTab(tabId, btn) {
     .forEach(div => div.classList.remove("active"));
   document.querySelectorAll(".tab")
     .forEach(b => b.classList.remove("active"));
-document
-  .getElementById("btnAutoImplantImportance")
-  ?.addEventListener("click", () => {
-    autoImplantationParImportance();
-  });
   document.getElementById(tabId)?.classList.add("active");
   btn?.classList.add("active");
 
@@ -3300,20 +3348,28 @@ await nextFrame();
       STOCK_ROWS = XLSX.utils.sheet_to_json(
         Object.values(stockSheets)[0]
       );
+// ✅ DÉTECTION DES COLONNES STOCK (STRICTEMENT CE FICHIER)
+const STOCK_HEADER = STOCK_ROWS[0] || {};
+
+EMP_COL_STOCK = getStockColumn(STOCK_HEADER, ["emplacemt", "emplacement"]);
+ARTICLE_COL   = getStockColumn(STOCK_HEADER, ["article"]);
+GEST_COL      = getStockColumn(STOCK_HEADER, ["gest"]);
+STOCK_QTE_COL = getStockColumn(STOCK_HEADER, ["stockdisponible"]);
+
+console.log("🧾 Colonnes STOCK détectées :", {
+  EMP_COL_STOCK,
+  ARTICLE_COL,
+  GEST_COL,
+  STOCK_QTE_COL
+});
     }
 ARTICLE_DATA_STOCK = {};
 
 STOCK_ROWS.forEach(row => {
-  const article = row["Article"];
+  const article = row[ARTICLE_COL];
   if (!article) return;
 
-  const rawFam =
-  row["Famille"] ||
-  row["famille"] ||
-  row["GEST"] ||
-  row["Gest"] ||
-  row["Gest."]; // ✅ COLONNE RÉELLE DU STOCK
-
+  const rawFam = row[GEST_COL];
   const fam = normalizeFamilleCode(rawFam);
   if (!fam) return;
 
@@ -3404,10 +3460,7 @@ const empToAutBrutes = {};
 
 // 1️⃣ Regroupement par emplacement (familles BRUTES, AUT uniquement)
 STOCK_ROWS.forEach(row => {
-  const emp =
-    row["Emplacement"] ||
-    row["Emplacement stock"] ||
-    row["EMPLACEMENT"];
+ const emp = row[EMP_COL_STOCK];
 
   const article = row["Article"];
   if (!emp || !article) return;
@@ -4817,7 +4870,10 @@ function buildAutoImplantationContext() {
   return { colonnes, empIndex };
 }
 async function autoImplantationParBlocs_2Phases(strategy, options = {}) {
-
+console.log(
+  "✅ autoImplantationParBlocs_2Phases EXECUTÉE — MODE =",
+  window.AUTO_IMPLANT_MODE
+);
 const MODE = window.AUTO_IMPLANT_MODE || "FAST";
 
 if (MODE === "FAST") {
