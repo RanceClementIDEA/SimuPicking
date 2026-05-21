@@ -83,7 +83,7 @@ const ENABLE_OPTIMISATION_GLOBALE = true;
 // ✅ seuil utilisé ailleurs → on le garde
 const SEUIL_MIN_P80 = 2;
 const SURFACE_PAR_EMPLACEMENT = 0.96; // m² (80 x 120 cm)
-
+const COUT_M2_AN = 40; // €/m²/an (à adapter)
 // Familles STRUCTURANTES : interdites en AUTRES
 const STRUCTURING_FAMILIES = new Set([
   "TA", // Tuyauterie
@@ -372,7 +372,11 @@ function getHauteurReimplant(allee, travee) {
   const totalDelta = d.ETAGERE + d.LISSE;
 
   const baseIdx = base.charCodeAt(0) - 65;
-  return String.fromCharCode(65 + baseIdx + totalDelta);
+const minIdx = getNiveauMin(allee, travee).charCodeAt(0) - 65;
+
+const finalIdx = Math.max(minIdx, baseIdx + totalDelta);
+
+return String.fromCharCode(65 + finalIdx);
 }
 
 /* =====================================================
@@ -580,6 +584,43 @@ function parseEmplacement(raw) {
 }
 
 console.log("✅ BLOC C chargé");
+
+function countWorkingDaysReal(start, end) {
+  let count = 0;
+
+  const d = new Date(start);
+  const endDate = new Date(end);
+
+  d.setHours(0,0,0,0);
+  endDate.setHours(0,0,0,0);
+
+  while (d <= endDate) {
+    const day = d.getDay();
+
+    if (day >= 1 && day <= 5) {
+      count++;
+    }
+
+    d.setDate(d.getDate() + 1);
+  }
+
+  return count;
+}
+function countActiveWorkingDays(prepDates) {
+  const uniqueDays = new Set();
+
+  prepDates.forEach(d => {
+    if (!(d instanceof Date)) return;
+
+    const day = d.getDay();
+    if (day === 0 || day === 6) return;
+
+    const key = d.toISOString().slice(0, 10);
+    uniqueDays.add(key);
+  });
+
+  return uniqueDays.size;
+}
 
 /************************************************
  * BLOC D — RÉFÉRENTIEL FAMILLES & COULEURS
@@ -1409,75 +1450,73 @@ function computeVerticalTime(emp, T) {
   const max = getMaxNiveauEffectif(emp.allee, emp.travee);
   return computeVerticalTimeInternal(emp, max, T);
 }
+
 function computeTotalTime(getEmpFn, T) {
   let total = 0;
 
   for (const lignes of Object.values(PREPS)) {
     if (!lignes || lignes.length === 0) continue;
 
-    // ✅ Séquenceur → Entrée NEF2
-    total += TEMPS_SEQUENCEUR;
-
-    // Emplacements de la préparation
-    const emps = lignes
+    // ✅ 1. Récupération des emplacements
+    let parcours = lignes
       .map(l => getEmpFn(l))
-      .filter(Boolean);
+      .filter(e => e);
 
-    if (emps.length === 0) continue;
+    if (!parcours.length) continue;
 
-    // ✅ Ordre opérateur réel
-    const parcours = orderByNearest(ENTRY_POINT, emps, T);
+    // ✅ 2. OPTIMISATION DU PARCOURS (CRITIQUE)
+    parcours = orderByNearest(ENTRY_POINT, parcours, T);
 
-    // ✅ Entrée NEF2 → premier emplacement (LE PLUS PROCHE)
-    total += distanceHorizontale(ENTRY_POINT, parcours[0], T);
-total += costEloignementAllee(parcours[0]); // ✅ AJOUT
+    let tempsPrep = 0;
 
-    for (let i = 0; i < parcours.length; i++) {
-      const emp = parcours[i];
+    // ✅ 3. TEMPS SEQUENCEUR
+    tempsPrep += TEMPS_SEQUENCEUR; // 18 s
 
-      // ✅ Déplacement vertical adaptatif (hauteur constante)
-total += computeVerticalTime(emp, T);
+    // =============================
+    // 🔹 ENTREE → 1ER ARTICLE
+    // =============================
+    let first = parcours[0];
 
+    tempsPrep += distanceHorizontale(ENTRY_POINT, first, T);
+    tempsPrep += costEloignementAllee(first);
+    tempsPrep += computeVerticalTime(first, T);
 
-      // Gestes opérateur
-      total += T.POS + T.PAL + T.UM + T.SCAN;
+    // ✅ PICK 1er article
+    tempsPrep += T.ROT + T.POS + T.SCAN + T.UM + T.PAL;
 
-      // ✅ Vers l’emplacement suivant le plus proche
-      if (i < parcours.length - 1) {
-        total += distanceHorizontale(emp, parcours[i + 1], T);
-      }
+    // =============================
+    // 🔹 PARCOURS MULTI-LIGNES
+    // =============================
+    for (let i = 0; i < parcours.length - 1; i++) {
+
+      const curr = parcours[i];
+      const next = parcours[i + 1];
+
+      // ✅ déplacement
+      tempsPrep += distanceHorizontale(curr, next, T);
+      tempsPrep += costEloignementAllee(next);
+      tempsPrep += computeVerticalTime(next, T);
+
+      // ✅ PICK à CHAQUE ligne
+      tempsPrep += T.ROT + T.POS + T.SCAN + T.UM + T.PAL;
     }
 
-    // ✅ Dernier emplacement → Entrée NEF2
-   total += distanceHorizontale(
-  parcours[parcours.length - 1],
-  ENTRY_POINT,
-  T
-);
-total += costEloignementAllee(
-  parcours[parcours.length - 1]
-); // ✅ AJOUT
+    // =============================
+    // 🔹 RETOUR ENTRÉE
+    // =============================
+    const last = parcours[parcours.length - 1];
 
-    // ✅ Entrée NEF2 → Séquenceur
-    total += TEMPS_SEQUENCEUR;
+    tempsPrep += distanceHorizontale(last, ENTRY_POINT, T);
+
+    // (optionnel mais réaliste)
+    // tempsPrep += T.DEPOT; 
+
+    total += tempsPrep;
   }
 
-  // Marge finale
   return total * (1 + T.MARGE);
 }
-function computeGlobalCost(state, T) {
 
-  applyStateToEmplacements(state);
-
-  const temps = computeTotalTime(
-    l => empFromId(l.empId),
-    T
-  );
-
-  const pen = computePenaliteSousDimensionnement();
-
-  return temps + pen;
-}
 function randomNeighbor(state) {
 
   const keys = Object.keys(state);
@@ -1786,14 +1825,16 @@ function heatGradient01(t) {
  */
 
 function drawHeatmapAvant() {
+const niveau = NIV_ACTUEL;
+if (!niveau) return;
+
+const isTotal = (niveau === "TOTAL"); // ✅ AJOUT CRITIQUE
+
   const canvas = document.getElementById("heatmap2D");
   if (!canvas) return;
 
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const niveau = NIV_ACTUEL;
-  if (!niveau) return;
 
 
   /* =========================
@@ -1806,10 +1847,12 @@ function drawHeatmapAvant() {
   ctx.font = "bold 13px Arial";
   ctx.textAlign = "left";
   ctx.fillText(
-    `Heatmap AVANT — Niveau ${niveau}`,
-    VIEW.offsetX,
-    VIEW.offsetY - 50
-  );
+  `Heatmap AVANT — ${
+    isTotal ? "Tous niveaux" : `Niveau ${niveau}`
+  }`,
+  VIEW.offsetX,
+  VIEW.offsetY - 50
+);
   ctx.restore();
 
   /* =========================
@@ -1864,46 +1907,75 @@ function drawHeatmapAvant() {
      NORMALISATION DES FRÉQUENCES
   ========================= */
 
-  let maxFreq = 1;
+  let heatData = {};
 
+if (isTotal) {
+  // ✅ cumul tous niveaux
   Object.entries(HEATMAP).forEach(([empId, freq]) => {
+
+    const e = EMPLACEMENTS[empId];
+    if (!e) return;
+    if (!isZonePicking(e)) return;
+
+    const key = `${e.allee}_${e.travee}_${e.position}`;
+    heatData[key] = (heatData[key] || 0) + freq;
+  });
+} else {
+  // ✅ niveau unique
+  Object.entries(HEATMAP).forEach(([empId, freq]) => {
+
     const e = EMPLACEMENTS[empId];
     if (!e || e.niveau !== niveau) return;
-    if (!emplacementExiste(e.allee, e.travee, e.position, e.niveau)) return;
-    if (freq > maxFreq) maxFreq = freq;
+    if (!isZonePicking(e)) return;
+
+    heatData[empId] = freq;
   });
+}
+
+// ✅ normalisation
+let maxFreq = 1;
+Object.values(heatData).forEach(f => {
+  if (f > maxFreq) maxFreq = f;
+});
 
   /* =========================
      DESSIN DE LA HEATMAP
   ========================= */
 
-  Object.entries(HEATMAP).forEach(([empId, freq]) => {
-    const e = EMPLACEMENTS[empId];
-    if (!e || e.niveau !== niveau) return;
-    if (!emplacementExiste(e.allee, e.travee, e.position, e.niveau)) return;
+  Object.entries(heatData).forEach(([key, freq]) => {
 
-    const ai = ALLEES.indexOf(e.allee);
-    if (ai < 0) return;
+  let e;
 
-    const row = ROW_INDEX[`${e.travee}|${e.position}`];
-    if (row == null) return;
+  if (isTotal) {
+    const [allee, tr, pos] = key.split("_");
+    e = {
+      allee,
+      travee: Number(tr),
+      position: Number(pos)
+    };
+  } else {
+    e = EMPLACEMENTS[key];
+  }
 
-    const t = Math.log(freq + 1) / Math.log(maxFreq + 1);
+  const ai = ALLEES.indexOf(e.allee);
+  if (ai < 0) return;
 
-    const x = VIEW.offsetX + ai * VIEW.cellW;
-    const y = VIEW.offsetY + row * VIEW.cellH;
+  const row = ROW_INDEX[`${e.travee}|${e.position}`];
+  if (row == null) return;
 
-    ctx.fillStyle = heatGradient01(t);
-    const cellKey = `${FILTERS.niveau}|${ai}|${row}`;
-    
+  const t = Math.log(freq + 1) / Math.log(maxFreq + 1);
 
-    ctx.fillRect(
-      x + 1,
-      y + 1,
-      VIEW.cellW - 2,
-      VIEW.cellH - 2
-    );
-  });
+  const x = VIEW.offsetX + ai * VIEW.cellW;
+  const y = VIEW.offsetY + row * VIEW.cellH;
+
+  ctx.fillStyle = heatGradient01(t);
+  ctx.fillRect(
+    x + 1,
+    y + 1,
+    VIEW.cellW - 2,
+    VIEW.cellH - 2
+  );
+});
 }
 
 /**
@@ -2488,6 +2560,7 @@ function bindAutoImplantModeSelector() {
   console.log("🔧 Mode auto‑implantation =", window.AUTO_IMPLANT_MODE);
 });
 }
+
 /* =========================
    FILTRE NIVEAU
 ========================= */
@@ -2555,7 +2628,40 @@ function fillFamilleFilter() {
 
   famSel.value = FILTERS.famille || "";
 }
+/* =========================
+   FILTRE HEATMAP NIVEAU
+========================= */
+function fillHeatmapLevelSelect() {
+console.log("🔥 fillHeatmapLevelSelect appelé");
+console.log("EMPLACEMENTS =", Object.keys(EMPLACEMENTS).length);
+console.log("getPossibleLevelsApres =", getPossibleLevelsApres());
 
+  const sel = document.getElementById("heatmapLevelSelect");
+  if (!sel) return;
+
+  sel.innerHTML = "";
+
+  // ✅ TOTAL
+  const optTotal = document.createElement("option");
+  optTotal.value = "TOTAL";
+  optTotal.textContent = "Tous niveaux";
+  sel.appendChild(optTotal);
+
+  // ✅ niveaux robustes
+  const niveaux = ["A","B","C","D","E","F","G","H","I","J"];
+
+
+  console.log("✅ niveaux heatmap =", niveaux);
+
+  niveaux.forEach(niv => {
+    const opt = document.createElement("option");
+    opt.value = niv;
+    opt.textContent = `Niveau ${niv}`;
+    sel.appendChild(opt);
+  });
+
+  sel.value = "TOTAL";
+}
 /* =========================
    PALETTE FAMILLE (PINCEAU)
 ========================= */
@@ -2639,6 +2745,15 @@ function bindUIOnce() {
     drawHeatmapAvant();
     drawZonePlan();
   }
+});
+// ✅ NOUVEAU SELECT HEATMAP
+const heatSel = document.getElementById("heatmapLevelSelect");
+
+heatSel?.addEventListener("change", e => {
+  NIV_ACTUEL = e.target.value;
+
+  resizeHeatmapCanvas();
+  drawHeatmapAvant();
 });
 // =====================================================
 // BOUTON AUTO‑IMPLANTATION — POINT D’ENTRÉE RÉEL
@@ -2754,6 +2869,7 @@ if (!niveaux.includes(NIV_REIMPLANT)) {
    INIT UI GLOBAL
 ========================= */
 function initUI() {
+fillHeatmapLevelSelect();
   fillLevelSelect();
   fillFamilleFilter();
   initFamillePalette();
@@ -2786,36 +2902,51 @@ function adjustReimpUI(delta) {
     alert("Sélectionne au moins une travée.");
     return;
   }
-IMPLANTATION_ACTIVE = true; // 🔑 CRUCIAL
+
+  IMPLANTATION_ACTIVE = true;
 
   travees.forEach(tr => {
     const key = `${allee}_${String(tr).padStart(2, "0")}`;
 
-    // ✅ structure robuste
     DELTA_NIVEAUX_REIMPLANT[key] ??= { ETAGERE: 0, LISSE: 0 };
-
     DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] += delta;
 
-// 🔒 sécurité
-DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] =
-  Math.max(0, DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU]);
-
-// ✅ ÉTAGÈRE = SOL (clé métier!)
-if (MODE_AJOUT_NIVEAU === "ETAGERE" && delta > 0) {
-  const base = HAUTEUR_MAX[key];
-  if (base) {
-    const baseIdx = base.charCodeAt(0) - 65;
-    const idx =
-      baseIdx +
-      DELTA_NIVEAUX_REIMPLANT[key].ETAGERE +
-      DELTA_NIVEAUX_REIMPLANT[key].LISSE;
-
-    const newLevel = String.fromCharCode(65 + idx);
-    NIVEAU_TYPE[newLevel] = "SOL"; // 🔑
-  }
-}
-
+    // ✅ UNE SEULE déclaration
     const base = HAUTEUR_MAX[key];
+
+    if (base) {
+      const baseIdx = base.charCodeAt(0) - 65;
+      const minIdx = getNiveauMin(allee, tr).charCodeAt(0) - 65;
+
+      const currentDelta =
+        DELTA_NIVEAUX_REIMPLANT[key].ETAGERE +
+        DELTA_NIVEAUX_REIMPLANT[key].LISSE;
+
+      const newIdx = baseIdx + currentDelta;
+
+      // 🔒 sécurité niveau minimum
+      if (newIdx < minIdx) {
+        DELTA_NIVEAUX_REIMPLANT[key].ETAGERE = 0;
+        DELTA_NIVEAUX_REIMPLANT[key].LISSE = minIdx - baseIdx;
+      }
+    }
+
+    // ✅ MODE ÉTAGÈRE => SOL
+    if (MODE_AJOUT_NIVEAU === "ETAGERE" && delta > 0) {
+      if (base) {
+        const baseIdx = base.charCodeAt(0) - 65;
+
+        const idx =
+          baseIdx +
+          DELTA_NIVEAUX_REIMPLANT[key].ETAGERE +
+          DELTA_NIVEAUX_REIMPLANT[key].LISSE;
+
+        const newLevel = String.fromCharCode(65 + idx);
+        NIVEAU_TYPE[newLevel] = "SOL";
+      }
+    }
+
+    // ✅ création niveaux
     if (!base) return;
 
     const baseIdx = base.charCodeAt(0) - 65;
@@ -2823,9 +2954,9 @@ if (MODE_AJOUT_NIVEAU === "ETAGERE" && delta > 0) {
     const nbL = DELTA_NIVEAUX_REIMPLANT[key].LISSE;
     const total = nbE + nbL;
 
-    // ✅ création physique réelle
     for (let i = 1; i <= total; i++) {
       const niv = String.fromCharCode(65 + baseIdx + i);
+
       ensurePhysicalLevelFor(allee, tr, niv);
 
       if (!(niv in NIVEAU_TYPE)) {
@@ -2842,6 +2973,7 @@ if (MODE_AJOUT_NIVEAU === "ETAGERE" && delta > 0) {
   updateReimpHeightInfo();
   updateReimpCompositionUI();
 }
+
 function initReimplantHeightUI() {
   const selA = document.getElementById("reimpAllee");
   const selT = document.getElementById("reimpTravee");
@@ -3084,7 +3216,22 @@ function adjustReimplantLevels(delta) {
 
   DELTA_NIVEAUX_REIMPLANT[key] ??= { ETAGERE: 0, LISSE: 0 };
 DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] += delta;
-DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU] =
+// ✅ autorise suppression mais limite à ne pas passer sous niveau minimum
+const base = HAUTEUR_MAX[key];
+if (base) {
+    const baseIdx = base.charCodeAt(0) - 65;
+    const minIdx = getNiveauMin(allee, tr).charCodeAt(0) - 65;
+
+    const currentDelta = DELTA_NIVEAUX_REIMPLANT[key].ETAGERE + DELTA_NIVEAUX_REIMPLANT[key].LISSE;
+
+    const newIdx = baseIdx + currentDelta;
+
+    // 🔒 limite basse
+    if (newIdx < minIdx) {
+        DELTA_NIVEAUX_REIMPLANT[key].ETAGERE = 0;
+        DELTA_NIVEAUX_REIMPLANT[key].LISSE = minIdx - baseIdx;
+    }
+}
   Math.max(0, DELTA_NIVEAUX_REIMPLANT[key][MODE_AJOUT_NIVEAU]);
 
   console.log(
@@ -4389,7 +4536,9 @@ function computeExecutiveSummary({
   const maxDate = new Date(Math.max(...dates));
 
   const dureeJours =
-    (maxDate - minDate) / (1000 * 60 * 60 * 24);
+  countActiveWorkingDays(Object.values(PREP_DATES));
+
+console.log("Jours utilisés =", dureeJours);
 
   const heuresTotales =
     deltaTempsTotalSecondes / 3600;
@@ -4565,10 +4714,46 @@ window.__SPACE_AVANT = spaceAvant;
 window.__SPACE_APRES = spaceApres;
 
 const deltaEmpl = spaceApres.total - spaceAvant.total;
-const deltaSurface = spaceApres.surfaceTotal - spaceAvant.surfaceTotal;
+const deltaSurface =
+  (spaceApres?.surfaceTotal ?? 0) -
+  (spaceAvant?.surfaceTotal ?? 0);
 
+const coutM2 =
+  Number(document.getElementById("coutM2")?.value) || 20;
+
+const gainSurfaceAnnuel =
+  deltaSurface * coutM2;
+const gainTotalAnnuel =
+  exec.economieParAn + gainSurfaceAnnuel;
   out.innerHTML = `
 <div class="dashboard">
+<!-- ================= GAINS FINANCIERS ================= -->
+<section class="card card-highlight">
+  <div class="card-header">
+    💰 Gains financiers
+  </div>
+
+  <div class="kpi-grid">
+
+    <div class="kpi">
+      <div class="kpi-label">Gain surface</div>
+      <div class="kpi-value">
+        ${gainSurfaceAnnuel.toFixed(0)} €
+      </div>
+      <div class="kpi-sub">
+        ${deltaSurface.toFixed(0)} m² × ${coutM2} €/m²
+      </div>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-label">Gain total</div>
+      <div class="kpi-value">
+        ${gainTotalAnnuel.toFixed(0)} €
+      </div>
+    </div>
+
+  </div>
+</section>
 
   <!-- ================= PRODUCTIVITÉ ================= -->
   <section class="card card-main">
@@ -4693,7 +4878,7 @@ const deltaSurface = spaceApres.surfaceTotal - spaceAvant.surfaceTotal;
 const HEURES_PAR_ETP_JOUR = 7;
 
 // SMIC horaire brut (France – 2026)
-const SMIC_HORAIRE_BRUT = 12.02;
+const SMIC_HORAIRE_BRUT = 23;
 
 // Hypothèse jours ouvrés
 const JOURS_OUVRES_PAR_AN = 220;
@@ -4726,6 +4911,33 @@ function displayComparisonKPIs(kpi) {
 
   document.getElementById("kpiEcoYear").textContent =
     `${kpi.ecoAn.toFixed(0)} €`;
+
+document.getElementById("kpiEcoSurface").textContent =
+  gainSurfaceAnnuel.toFixed(0) + " €";
+
+const gainTotalAnnuel =
+  exec.economieParAn + gainSurfaceAnnuel;
+
+let surfaceLabel = "";
+
+if (deltaSurface > 0) {
+  surfaceLabel = `+${deltaSurface.toFixed(0)} m² (gain capacité)`;
+} else if (deltaSurface < 0) {
+  surfaceLabel = `${deltaSurface.toFixed(0)} m² (perte capacité)`;
+} else {
+  surfaceLabel = "0 m² (stable)";
+}
+
+document.getElementById("kpiEcoSurface").title = surfaceLabel;
+
+document.getElementById("kpiEcoTotal").textContent =
+  gainTotalAnnuel.toFixed(0) + " €";
+
+
+console.log("deltaSurface =", deltaSurface);
+console.log("gainSurfaceAnnuel =", gainSurfaceAnnuel);
+console.log("spaceAvant =", spaceAvant.surfaceTotal);
+console.log("spaceApres =", spaceApres.surfaceTotal);
 
   document.getElementById("kpiSummaryText").innerHTML = `
     ✅ L’implantation permet un <b>gain opérationnel de

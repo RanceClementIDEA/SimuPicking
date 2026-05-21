@@ -121,13 +121,12 @@
   <!-- ================= PLAN + HEATMAP ================= -->
   <section class="card">
     <h3>Plan 2D – Heatmap (situation actuelle)</h3>
-
+<select id="heatmapLevelSelect"></select>
     <div id="plan-container-actuel">
       <canvas id="plan2D-actuel"></canvas>
       <canvas id="heatmap2D"></canvas>
     </div>
   </section>
-
 </div>
 
 <!-- ================= ONGLET 2 : RÉIMPLANTATION ================= -->
@@ -299,7 +298,6 @@
       <div class="kpi-label">Heures gagnées / jour</div>
       <div class="kpi-value" id="kpiHoursDay">—</div>
     </div>
-
     <div class="kpi-box highlight">
       <div class="kpi-label">ETP gagné</div>
       <div class="kpi-value" id="kpiETP">—</div>
@@ -314,7 +312,8 @@
       <div class="kpi-label">Économie / an (€)</div>
       <div class="kpi-value" id="kpiEcoYear">—</div>
     </div>
-  </div>
+</div>
+
 <div class="export-actions" style="margin-top:12px;">
   <button class="btn btn-primary" onclick="exportComparisonPDF()">
     📄 Export PDF
