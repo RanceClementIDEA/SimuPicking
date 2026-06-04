@@ -141,6 +141,7 @@ function computeVariableMarge({ fam, besoinStock = 0, besoinFlux = 0 }) {
 }
 
 
+
 /* =========================
    AFFICHAGE
 ========================= */
@@ -3793,6 +3794,35 @@ console.log("✅ BLOC L chargé");
  * ✅ Somme = nombre d’emplacements STOCK occupés
  ************************************************/
 
+function computeTauxRemplissageAuto() {
+
+  const emplByFam = computeStockEmplacementsByFamille();
+  const totalEmpl = countPhysicalEmplacements();
+
+  const taux = {};
+
+  Object.keys(emplByFam).forEach(fam => {
+
+    const occupied = emplByFam[fam] || 0;
+
+    // ✅ estimation de la zone dédiée
+    const part = occupied / totalEmpl;
+
+    // ✅ taux réel basé sur occupation
+    let tauxRemplissage = occupied > 0
+      ? Math.min(1, occupied / (occupied + (occupied * 0.3)))
+      : 0.75;
+
+    // 🔒 bornes réalistes
+    tauxRemplissage = Math.min(0.9, Math.max(0.6, tauxRemplissage));
+
+    taux[fam] = tauxRemplissage;
+  });
+
+  console.log("✅ Taux remplissage AUTO CORRIGÉ :", taux);
+
+  return taux;
+}
 function computeStockNeedByFamille() {
   if (BESOIN_STOCK_CACHE) return BESOIN_STOCK_CACHE;
 
@@ -3846,178 +3876,280 @@ function rebuildEmplCountByFam() {
  * AIDE À L’IMPLANTATION — VERSION FINALE
  * Lecture seule : aucune modification d’EMPLACEMENTS
  ************************************************/
+function computeTauxCible(occupation) {
 
+  let tauxCible = 0.8; // cible nominale
+
+  if (occupation > 0.9) {
+    tauxCible = 0.7; // saturation → on desserre fortement
+  }
+  else if (occupation > 0.85) {
+    tauxCible = 0.75;
+  }
+  else if (occupation < 0.6) {
+    tauxCible = 0.85; // trop vide → on compacte
+  }
+
+  return Math.min(0.9, Math.max(0.6, tauxCible));
+}
+function computeEmplCapacityByFamille() {
+
+  const besoinStockByFam = computeStockNeedByFamille();
+  const totalStock = Object.values(besoinStockByFam)
+    .reduce((a, b) => a + b, 0);
+
+  const totalEmpl = countPhysicalEmplacements();
+
+  const capacity = {};
+
+  Object.keys(besoinStockByFam).forEach(fam => {
+
+    const part =
+      totalStock > 0
+        ? besoinStockByFam[fam] / totalStock
+        : 0;
+
+    capacity[fam] = part * totalEmpl;
+  });
+
+  return capacity;
+}
 function computeAideImplantation() {
+
   const container = document.getElementById("implantationHintsContent");
   if (!container) return;
 
-  // ✅ helper local (corrige l'erreur "r is not defined")
   const r = v => Math.round(v || 0);
 
-  // ✅ besoin STOCK (emplacements)
   const besoinStockByFam = computeStockNeedByFamille() || {};
+  const capacityByFam = computeEmplCapacityByFamille();
 
-  // ✅ besoin FLUX (historique)
   const besoinFluxByFam =
-  HISTO_ANALYSIS?.p80FluxByFam ||
-  HISTO_ANALYSIS?.avgFluxByFam ||
-  {};
+    HISTO_ANALYSIS?.p80FluxByFam ||
+    HISTO_ANALYSIS?.avgFluxByFam ||
+    {};
 
-    const capByFam = computeCapaciteReelleByFamille();
+  const capByFam = computeCapaciteReelleByFamille();
 
-  /* =========================
-     AGRÉGATION PAR FAMILLE D’IMPLANTATION
-  ========================= */
+  // =========================
+  // TAUX GLOBAL
+  // =========================
 
-  const agg = {};
-  // ✅ Familles à considérer dans l'aide
-// ✅ Familles prises en compte dans l'aide à l'implantation
-const familles = new Set([
-  ...STRUCTURING_FAMILIES,
-  ...Object.keys(besoinStockByFam),
-  ...Object.keys(besoinFluxByFam)
-]);
+  let totalStock = 0;
+  let totalCapacite = 0;
 
-familles.forEach(fam => {
-  if (!agg[fam]) {
-    agg[fam] = {
-      fam,
-      besoinStockEmpl: 0,
-      besoinFluxRef: 0,
-      cap: 1,
-      besoinFluxEmpl: 0,
-      besoinCibleRaw: 0,
-      besoinCible: 0
-    };
-  }
-
-  agg[fam].besoinStockEmpl += besoinStockByFam[fam] || 0;
-  agg[fam].besoinFluxRef  += besoinFluxByFam[fam]  || 0;
-});
-
-  /* =========================
-     CONVERSION FLUX → EMPLACEMENTS
-  ========================= */
-
- Object.values(agg).forEach(o => {
-  const cap = capByFam[o.fam] || 1;
-
-  o.cap = cap;
-  o.besoinFluxEmpl = o.besoinFluxRef;
-
-  // Besoin brut (sans marge)
-  const besoinBrut = Math.max(
-    o.besoinStockEmpl,
-    o.besoinFluxEmpl
-  );
-
-  // ✅ marge métier VARIABLE (Option C)
-  const margeBrute = computeVariableMarge({
-    fam: o.fam,
-    besoinStock: o.besoinStockEmpl,
-    besoinFlux: o.besoinFluxEmpl
+  Object.keys(besoinStockByFam).forEach(fam => {
+    totalStock += besoinStockByFam[fam] || 0;
+    totalCapacite += capacityByFam[fam] || 0;
   });
 
-  // ✅ marge COMPRESSÉE (50 %)
-  const margeEffective = margeBrute * 0.2;
+  const tauxGlobalOccupation =
+    totalCapacite > 0
+      ? totalStock / totalCapacite
+      : 0.8;
 
-  o.besoinCibleRaw = besoinBrut * (1 + margeEffective);
-  o.besoinCible = Math.ceil(o.besoinCibleRaw);
-});
+  const capaciteTotaleCible = countPhysicalEmplacements();
 
-  /* =========================
-     TABLE + TOTAUX
-  ========================= */
+  // =========================
+  // AGRÉGATION
+  // =========================
+
+  const agg = {};
+
+  const familles = new Set([
+    ...STRUCTURING_FAMILIES,
+    ...Object.keys(besoinStockByFam),
+    ...Object.keys(besoinFluxByFam)
+  ]);
+
+  familles.forEach(fam => {
+    agg[fam] = {
+      fam,
+      besoinStockEmpl: besoinStockByFam[fam] || 0,
+      besoinFluxRef: besoinFluxByFam[fam] || 0,
+      cap: capByFam[fam] || 1
+    };
+  });
+
+  // =========================
+  // CALCUL BRUT
+  // =========================
+
+  Object.values(agg).forEach(o => {
+
+    const partStock =
+      totalStock > 0
+        ? o.besoinStockEmpl / totalStock
+        : 0;
+
+    o.partStock = partStock;
+
+    o.occupation =
+      partStock * tauxGlobalOccupation;
+
+    o.tauxCible = partStock;
+
+    o.capaciteNecessaire =
+      Math.ceil(partStock * totalStock);
+
+    o.capaciteCibleRaw =
+      partStock * capaciteTotaleCible;
+  });
+
+  // =========================
+  // ARRONDI CONTRÔLÉ
+  // =========================
+
+  let totalArrondi = 0;
+
+  Object.values(agg).forEach(o => {
+    o.capaciteCible = Math.floor(o.capaciteCibleRaw);
+    totalArrondi += o.capaciteCible;
+  });
+
+  let reste = capaciteTotaleCible - totalArrondi;
+
+  const sorted = Object.values(agg)
+    .slice()
+    .sort((a, b) =>
+      (b.capaciteCibleRaw - Math.floor(b.capaciteCibleRaw))
+      -
+      (a.capaciteCibleRaw - Math.floor(a.capaciteCibleRaw))
+    );
+
+  for (let i = 0; i < reste; i++) {
+    sorted[i].capaciteCible += 1;
+  }
+
+  // =========================
+  // TABLE + EXPORT
+  // =========================
 
   const rows = [];
+
   const total = {
     besoinStock: 0,
-    besoinFlux: 0,
-    besoinCible: 0,
+    capacite: 0,
+    capaciteCible: 0,
     poses: 0,
     manque: 0
   };
 
+  window.__BESOIN_CIBLE_PAR_FAM = {};
+
   Object.values(agg).forEach(o => {
-    let poses = 0;
-    let manque = 0;
-    let statut = "ℹ️ Aucun emplacement posé";
 
-    if (IMPLANTATION_ACTIVE) {
-      poses = EMPL_COUNT_BY_FAM?.[o.fam] || 0;
+    const poses =
+      EMPL_COUNT_BY_FAM?.[o.fam] || 0;
 
-      manque = Math.max(0, o.besoinCible - poses);
-      statut = manque === 0 ? "🟢 OK" : "🔴 Sous-dimensionné";
-    }
+    const manque =
+      Math.max(0, o.capaciteCible - poses);
+
+    window.__BESOIN_CIBLE_PAR_FAM[o.fam] = o.capaciteCible;
 
     rows.push({
       fam: o.fam,
-      cap: o.cap,
       besoinStock: o.besoinStockEmpl,
-      besoinFlux: o.besoinFluxEmpl,
-      besoinCible: o.besoinCible,
+      tauxCible: o.tauxCible,
+      capacite: o.capaciteNecessaire,
+      capaciteCible: o.capaciteCible,
       poses,
       manque,
-      statut
+      occupation: o.occupation
     });
 
     total.besoinStock += o.besoinStockEmpl;
-    total.besoinFlux  += o.besoinFluxEmpl;
-    total.besoinCible += o.besoinCible;
-    total.poses       += poses;
-    total.manque      += manque;
+    total.capacite += o.capaciteNecessaire;
+    total.capaciteCible += o.capaciteCible;
+    total.poses += poses;
   });
-// ✅ export pour l'auto-implantation
-window.__BESOIN_CIBLE_PAR_FAM = {};
 
-rows.forEach(r => {
-  window.__BESOIN_CIBLE_PAR_FAM[r.fam] = r.besoinCible;
-});
-  /* =========================
-     AFFICHAGE
-  ========================= */
+  // ✅ CORRECTION CRITIQUE → vrai manque total
+  total.manque = rows.reduce((sum, r) => sum + r.manque, 0);
 
-  container.innerHTML = `
-    <table style="width:100%; border-collapse:collapse; font-size:12px;">
-      <thead>
-        <tr>
-          <th>Famille</th>
-          <th>Capacité réelle</th>
-          <th>Besoin stock</th>
-          <th>Besoin flux</th>
-          <th>Besoin cible</th>
-          <th>Empl. posés</th>
-          <th>Manque</th>
-          <th>Statut</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows.map(rw => `
-          <tr>
-            <td><b>${rw.fam}</b></td>
-            <td style="text-align:right">${rw.cap.toFixed(2)}</td>
-            <td style="text-align:right">${r(rw.besoinStock)}</td>
-            <td style="text-align:right">${r(rw.besoinFlux)}</td>
-            <td style="text-align:right"><b>${r(rw.besoinCible)}</b></td>
-            <td style="text-align:right">${rw.poses}</td>
-            <td style="text-align:right">${rw.manque}</td>
-            <td style="text-align:center">${rw.statut}</td>
-          </tr>
-        `).join("")}
-        <tr style="border-top:2px solid #000; font-weight:bold;">
-          <td>TOTAL</td>
-          <td></td>
-          <td style="text-align:right">${r(total.besoinStock)}</td>
-          <td style="text-align:right">${r(total.besoinFlux)}</td>
-          <td style="text-align:right">${r(total.besoinCible)}</td>
-          <td style="text-align:right">${total.poses}</td>
-          <td style="text-align:right">${total.manque}</td>
-          <td></td>
-        </tr>
-      </tbody>
-    </table>
-  `;
+  // =========================
+// AFFICHAGE
+// =========================
+
+container.innerHTML = `
+<table style="
+  width:100%;
+  border-collapse:collapse;
+  font-size:12px;
+  text-align:right;
+">
+
+  <thead>
+    <tr style="background:#f5f5f5; border-bottom:2px solid #000;">
+      <th style="text-align:left; padding:4px;">Famille</th>
+      <th>Besoin stock</th>
+      <th>Occupation</th>
+      <th>Taux cible</th>
+      <th>Capacité</th>
+      <th>Capacité cible</th>
+      <th>Posés</th>
+      <th>Manque</th>
+    </tr>
+  </thead>
+
+  <tbody>
+
+    ${rows.map(rw => `
+      <tr style="border-bottom:1px solid #ddd;">
+        <td style="text-align:left; padding:4px;"><b>${rw.fam}</b></td>
+
+        <td>${r(rw.besoinStock)}</td>
+
+        <td>${(rw.occupation * 100).toFixed(1)}%</td>
+
+        <td>${(rw.tauxCible * 100).toFixed(1)}%</td>
+
+        <td>${r(rw.capacite)}</td>
+
+        <td><b>${r(rw.capaciteCible)}</b></td>
+
+        <td>${rw.poses}</td>
+
+        <td style="
+          color:${rw.manque > 0 ? '#d32f2f' : '#388e3c'};
+          font-weight:bold;
+        ">
+          ${rw.manque}
+        </td>
+      </tr>
+    `).join("")}
+
+    <tr style="
+      border-top:2px solid #000;
+      font-weight:bold;
+      background:#fafafa;
+    ">
+      <td style="text-align:left; padding:4px;">TOTAL</td>
+
+      <td>${r(total.besoinStock)}</td>
+
+      <td>${(tauxGlobalOccupation * 100).toFixed(1)}%</td>
+
+      <td>100%</td>
+
+      <td>${r(total.capacite)}</td>
+
+      <td><b>${r(total.capaciteCible)}</b></td>
+
+      <td>${total.poses}</td>
+
+      <td style="
+        color:${total.manque > 0 ? '#d32f2f' : '#388e3c'};
+      ">
+        ${total.manque}
+      </td>
+    </tr>
+
+  </tbody>
+</table>
+`;
 }
+
 function computePenaliteSousDimensionnement() {
 
   const cible = window.__BESOIN_CIBLE_PAR_FAM || {};
@@ -5897,4 +6029,3 @@ function exportReimplantationPlanImage() {
   a.download = "Plan_Reimplantation.png";
   a.click();
 }
-
